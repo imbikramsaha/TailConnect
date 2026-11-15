@@ -286,7 +286,8 @@ func SafeName(name string) (string, error) {
 	}, name)
 	name = strings.TrimLeft(strings.TrimSpace(name), ".")
 	name = strings.TrimRight(name, ". ") // Windows strips these silently
-	if name == "" || name == "/" {
+	// filepath.Base returns the separator itself for "/" (and "\" on Windows).
+	if name == "" || strings.ContainsAny(name, `/\`) {
 		return "", errors.New("invalid file name")
 	}
 	// Windows reserved device names (CON, NUL, COM1…), with any extension.
@@ -336,6 +337,12 @@ func Receive(dir, name string, r io.Reader) (string, int64, error) {
 			cand = fmt.Sprintf("%s (%d)%s", base, i, ext)
 		}
 		dst := filepath.Join(dir, cand)
+		// Defence in depth: the result must be a direct child of dir.
+		if rel, err := filepath.Rel(dir, dst); err != nil || rel != filepath.Base(dst) || strings.HasPrefix(rel, "..") ||
+			!strings.HasPrefix(filepath.Clean(dst), filepath.Clean(dir)+string(filepath.Separator)) {
+			os.Remove(tmp.Name())
+			return "", 0, errors.New("invalid file name")
+		}
 		if _, err := os.Lstat(dst); err == nil {
 			continue
 		}

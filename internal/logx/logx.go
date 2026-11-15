@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -55,8 +56,8 @@ func Open(dir string, echo io.Writer) (*Logs, error) {
 	if echo != nil {
 		aw = io.MultiWriter(app, echo)
 	}
-	l.App = log.New(aw, "", log.LstdFlags)
-	l.Session = log.New(io.MultiWriter(sess, app), "session: ", log.LstdFlags)
+	l.App = log.New(oneLine{aw}, "", log.LstdFlags)
+	l.Session = log.New(oneLine{io.MultiWriter(sess, app)}, "session: ", log.LstdFlags)
 	l.Verbose = log.New(ts, "", log.LstdFlags|log.Lmicroseconds)
 	l.App.Printf("---- TailConnect starting %s (pid %d)", time.Now().Format(time.RFC3339), os.Getpid())
 	return l, nil
@@ -76,4 +77,31 @@ func Discard() *Logs {
 }
 
 // Printf logs to the app log.
-func (l *Logs) Printf(format string, args ...any) { l.App.Output(2, fmt.Sprintf(format, args...)) }
+func (l *Logs) Printf(format string, args ...any) {
+	l.App.Output(2, Clean(fmt.Sprintf(format, args...)))
+}
+
+// Clean makes a log message a single line: line breaks and other control
+// characters (which a peer could use to forge entries) are escaped.
+func Clean(s string) string {
+	s = strings.ReplaceAll(s, "\r", `\r`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 && r != '\t' || r == 0x7f || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
+			return '\uFFFD'
+		}
+		return r
+	}, s)
+}
+
+// oneLine is an io.Writer for log.Logger that guarantees one line per
+// record, whatever the caller formatted (Session.Printf etc. all pass here).
+type oneLine struct{ w io.Writer }
+
+func (o oneLine) Write(p []byte) (int, error) {
+	s := strings.TrimSuffix(string(p), "\n")
+	if _, err := io.WriteString(o.w, Clean(s)+"\n"); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}

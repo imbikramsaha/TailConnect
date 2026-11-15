@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"os/user"
@@ -142,7 +143,9 @@ func ParseGPUProcs(out string) map[int]float64 {
 
 // Kill terminates a process owned by the user running TailConnect.
 func Kill(ctx context.Context, pid int) error {
-	if pid <= 1 || pid == os.Getpid() {
+	// Bound-check before narrowing to int32: a huge value would otherwise
+	// wrap around to a different process ID.
+	if pid <= 1 || pid > math.MaxInt32 || pid == os.Getpid() {
 		return errors.New("refusing to stop that process")
 	}
 	p, err := process.NewProcessWithContext(ctx, int32(pid))
