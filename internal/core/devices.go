@@ -214,7 +214,10 @@ func (c *Core) Launch(ctx context.Context, id, appID string) error {
 	if dev.Kind == store.KindPeer {
 		if p, ok := c.peer(dev.NodeID); !ok || !p.Online {
 			return fmt.Errorf("%s is offline", dev.Name)
-		} else if p.Hello != nil && !p.Hello.SSH {
+		} else if p.Hello != nil && !p.Hello.SSH && p.Hello.BuiltinSSH == 0 {
+			if p.Hello.Access != "" && p.Hello.Access != store.AccessFull {
+				return fmt.Errorf("%s only gives this computer %q access; terminals and editors need full access (change it in TailConnect on %s)", dev.Name, p.Hello.Access, dev.Name)
+			}
 			return ErrNoSSH(dev)
 		}
 	}

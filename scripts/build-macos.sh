@@ -18,12 +18,14 @@ APP="$OUT/TailConnect.app"
 BUILD="$OUT/build-macos"
 DMG="$OUT/TailConnect-$VERSION-macos.dmg"
 
-rm -rf "$APP" "$BUILD" "$DMG"
+rm -rf "$APP" "$BUILD" "$DMG" "$OUT/SHA256SUMS"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$BUILD"
 
 echo "==> Building universal binary ($VERSION)"
 export CGO_ENABLED=1 MACOSX_DEPLOYMENT_TARGET=13.0
-LDFLAGS="-s -w -X main.version=$VERSION"
+# The webview library's header trips a clang deprecation warning; harmless.
+export CGO_CXXFLAGS="-Wno-deprecated-literal-operator"
+LDFLAGS="-s -w -X main.version=$VERSION -extldflags=-Wl,-no_warn_duplicate_libraries"
 for arch in arm64 amd64; do
   GOOS=darwin GOARCH=$arch go build -trimpath -ldflags "$LDFLAGS" -o "$BUILD/tailconnect-$arch" ./cmd/tailconnect
 done
@@ -81,7 +83,9 @@ if [[ -n "${SIGN_IDENTITY:-}" ]]; then
     xcrun stapler staple "$DMG"
   fi
 fi
+(cd "$OUT" && shasum -a 256 "$(basename "$DMG")" > SHA256SUMS)
 rm -rf "$BUILD"
 echo
 echo "Built $APP"
 echo "      $DMG ($(du -h "$DMG" | cut -f1))"
+echo "      $OUT/SHA256SUMS"

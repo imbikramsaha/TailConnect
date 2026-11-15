@@ -60,6 +60,7 @@ func (t *Tray) onReady() {
 	setIcon(false)
 	systray.SetTitle("")
 	systray.SetTooltip("TailConnect")
+	onReopen(func() { t.ShowUI("") })
 	if runtime.GOOS != "darwin" {
 		// On macOS a tap handler would replace the menu on left click;
 		// Mac users expect the menu, so keep the default there.
@@ -120,8 +121,12 @@ func (t *Tray) menu(v core.View) []entry {
 		id := r.ID
 		m = append(m, entry{title: "⚠ Pairing request: " + r.Name, children: []entry{
 			{title: "From " + r.LoginName, disabled: true},
-			{title: "Approve", click: func() { t.decide(id, true) }},
-			{title: "Decline", click: func() { t.decide(id, false) }},
+			{title: "Code " + r.Code + " — check it matches on " + r.Name, disabled: true},
+			{sep: true},
+			{title: "Approve: full access", click: func() { t.decide(id, true, "full") }},
+			{title: "Approve: ports & monitor only", click: func() { t.decide(id, true, "ports") }},
+			{title: "Approve: monitor only", click: func() { t.decide(id, true, "stats") }},
+			{title: "Decline", click: func() { t.decide(id, false, "") }},
 		}})
 	}
 	if len(v.PairRequests) > 0 {
@@ -228,6 +233,31 @@ func (t *Tray) deviceMenu(v core.View, d core.DeviceView) []entry {
 		m = append(m, entry{title: "SSH is off on this device", disabled: true})
 	}
 	m = append(m, entry{title: "Resource Monitor", click: func() { t.ShowUI("#/device/" + id) }})
+	if d.Online && (d.Kind != "peer" || d.Access == "full" || d.Access == "ports") {
+		m = append(m, entry{title: "Screen Sharing", click: func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+			if _, err := t.Core.RemoteDesktop(ctx, id); err != nil {
+				t.Logs.Printf("tray remote desktop: %v", err)
+				t.ShowUI("#/device/" + id)
+			}
+		}})
+	}
+	if d.Kind == "peer" && d.Online && d.Access == "full" {
+		m = append(m,
+			entry{title: "Send My Clipboard", click: func() { t.clip(id, true) }},
+			entry{title: "Copy Its Clipboard", click: func() { t.clip(id, false) }},
+		)
+	}
+	if !d.Online && d.CanWake {
+		m = append(m, entry{title: "Wake " + d.Name, click: func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if _, err := t.Core.Wake(ctx, id); err != nil {
+				t.Logs.Printf("tray wake: %v", err)
+			}
+		}})
+	}
 	if len(v.Apps) > 0 {
 		m = append(m, entry{sep: true})
 		runningApps := map[string]bool{}
@@ -235,6 +265,9 @@ func (t *Tray) deviceMenu(v core.View, d core.DeviceView) []entry {
 			runningApps[r.AppID] = true
 		}
 		for _, a := range v.Apps {
+			if !a.AppliesTo(id) {
+				continue
+			}
 			app := a.ID
 			if runningApps[app] {
 				m = append(m, entry{title: fmt.Sprintf("■ Stop %s (:%d)", a.Name, a.Port), click: func() {
@@ -260,8 +293,8 @@ func (t *Tray) deviceMenu(v core.View, d core.DeviceView) []entry {
 	return m
 }
 
-func (t *Tray) decide(id string, approve bool) {
-	if err := t.Core.ApprovePair(id, approve); err != nil {
+func (t *Tray) decide(id string, approve bool, access string) {
+	if err := t.Core.ApprovePair(id, approve, access); err != nil {
 		t.Logs.Printf("tray pair decision: %v", err)
 	}
 }
@@ -347,5 +380,19 @@ func (t *Tray) add(ctx context.Context, parent *systray.MenuItem, es []entry) {
 				}
 			}(it, e.click)
 		}
+	}
+}
+
+func (t *Tray) clip(id string, push bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	var err error
+	if push {
+		err = t.Core.PushClipboard(ctx, id)
+	} else {
+		_, err = t.Core.PullClipboard(ctx, id)
+	}
+	if err != nil {
+		t.Logs.Printf("tray clipboard: %v", err)
 	}
 }

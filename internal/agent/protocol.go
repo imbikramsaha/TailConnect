@@ -9,6 +9,9 @@ package agent
 // Port is the tailnet TCP port of the agent API.
 const Port = 4747
 
+// SSHPort is the tailnet TCP port of TailConnect's built-in SSH server.
+const SSHPort = 4748
+
 // ProtocolVersion is bumped on incompatible API changes.
 const ProtocolVersion = 1
 
@@ -34,6 +37,14 @@ type Hello struct {
 	SSHPort int `json:"sshPort,omitempty"`
 	// Trusted reports whether the caller is paired with this device.
 	Trusted bool `json:"trusted"`
+	// Access is the caller's access level on this device ("" if untrusted).
+	Access string `json:"access,omitempty"`
+	// BuiltinSSH is the built-in SSH server's tailnet port (0 = off). Only
+	// revealed to callers with full access.
+	BuiltinSSH int `json:"builtinSSH,omitempty"`
+	// MACs and LANs let paired devices wake this one (Wake-on-LAN).
+	MACs []string `json:"macs,omitempty"`
+	LANs []string `json:"lans,omitempty"`
 }
 
 // PairRequest asks a device to trust the caller.
@@ -59,6 +70,53 @@ type PairResponse struct {
 	SSH     bool   `json:"ssh"`
 	SSHPort int    `json:"sshPort,omitempty"`
 	Message string `json:"message,omitempty"`
+	// Code is the pairing confirmation code shown on both devices.
+	Code string `json:"code,omitempty"`
+}
+
+// Service is a TCP port something is listening on.
+type Service struct {
+	Port    int    `json:"port"`
+	Address string `json:"address"`
+	PID     int    `json:"pid,omitempty"`
+	Process string `json:"process,omitempty"`
+	// Label is a friendly guess at what it is ("Jupyter", "Ollama"…).
+	Label string `json:"label,omitempty"`
+	// Web reports whether it likely serves a web page.
+	Web bool `json:"web"`
+}
+
+// Process is a running process.
+type Process struct {
+	PID    int     `json:"pid"`
+	Name   string  `json:"name"`
+	User   string  `json:"user,omitempty"`
+	CPU    float64 `json:"cpu"`
+	Mem    float64 `json:"mem"` // percent of RAM
+	RSS    uint64  `json:"rss"`
+	GPUMiB float64 `json:"gpuMiB,omitempty"`
+	Cmd    string  `json:"cmd,omitempty"`
+}
+
+// Container is a Docker container.
+type Container struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Image  string `json:"image"`
+	State  string `json:"state"`
+	Status string `json:"status"`
+	Ports  string `json:"ports,omitempty"`
+}
+
+// Clipboard carries clipboard text.
+type Clipboard struct {
+	Text string `json:"text"`
+}
+
+// FileResult reports where a received file was saved.
+type FileResult struct {
+	Path string `json:"path"`
+	Size int64  `json:"size"`
 }
 
 // Caller is the verified identity of a tailnet peer making a request.

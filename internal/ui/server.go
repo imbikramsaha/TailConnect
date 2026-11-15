@@ -6,8 +6,10 @@ package ui
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +20,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/imbikramsaha/tailconnect/internal/core"
@@ -50,6 +53,9 @@ type Server struct {
 
 	port int
 	srv  *http.Server
+
+	tmu     sync.Mutex
+	tickets map[string]time.Time // one-time window sign-in tickets
 }
 
 // Listen binds the control API on loopback, preferring DefaultPort.
@@ -104,6 +110,22 @@ func (s *Server) Serve(ln net.Listener) error {
 	api.HandleFunc("PUT /api/settings", s.settings)
 	api.HandleFunc("POST /api/open-logs", s.openLogs)
 	api.HandleFunc("GET /api/proxy", s.proxy)
+	api.HandleFunc("PUT /api/trusted/{node}", s.setAccess)
+	api.HandleFunc("GET /api/devices/{id}/services", s.services)
+	api.HandleFunc("POST /api/devices/{id}/forward", s.forward)
+	api.HandleFunc("GET /api/devices/{id}/processes", s.processes)
+	api.HandleFunc("POST /api/devices/{id}/processes/{pid}/kill", s.kill)
+	api.HandleFunc("GET /api/devices/{id}/containers", s.containers)
+	api.HandleFunc("POST /api/devices/{id}/containers/{cid}/{action}", s.containerAction)
+	api.HandleFunc("POST /api/devices/{id}/wake", s.wake)
+	api.HandleFunc("POST /api/devices/{id}/remote-desktop", s.remoteDesktop)
+	api.HandleFunc("GET /api/devices/{id}/diagnose", s.diagnose)
+	api.HandleFunc("POST /api/devices/{id}/files", s.sendFile)
+	api.HandleFunc("POST /api/devices/{id}/clipboard/{dir}", s.clipboard)
+	api.HandleFunc("GET /api/activity", s.activity)
+	api.HandleFunc("POST /api/report", s.report)
+	api.HandleFunc("POST /api/update/check", s.updateCheck)
+	api.HandleFunc("POST /api/update/install", s.updateInstall)
 	mux.Handle("/api/", s.guard(api))
 
 	s.srv = &http.Server{Handler: s.hostCheck(mux), ReadHeaderTimeout: 10 * time.Second}
@@ -127,9 +149,23 @@ func (s *Server) Close() error {
 	return s.srv.Shutdown(ctx)
 }
 
-// LoginURL is the URL that authenticates a UI window and opens route.
+// LoginURL returns a single-use URL (valid two minutes) that signs a UI
+// window in and opens route. The long-lived token never appears in URLs or
+// process arguments.
 func (s *Server) LoginURL(route string) string {
-	u := fmt.Sprintf("http://127.0.0.1:%d/auth?t=%s", s.port, url.QueryEscape(s.Token))
+	t := randomHex(16)
+	s.tmu.Lock()
+	if s.tickets == nil {
+		s.tickets = map[string]time.Time{}
+	}
+	for k, exp := range s.tickets {
+		if time.Now().After(exp) {
+			delete(s.tickets, k)
+		}
+	}
+	s.tickets[t] = time.Now().Add(2 * time.Minute)
+	s.tmu.Unlock()
+	u := fmt.Sprintf("http://127.0.0.1:%d/auth?t=%s", s.port, t)
 	if route != "" {
 		u += "&next=" + url.QueryEscape(route)
 	}
@@ -182,13 +218,22 @@ func (s *Server) guard(next http.Handler) http.Handler {
 // auth exchanges the one-time URL token for a session cookie.
 func (s *Server) auth(w http.ResponseWriter, r *http.Request) {
 	t := r.URL.Query().Get("t")
-	if subtle.ConstantTimeCompare([]byte(t), []byte(s.Token)) != 1 {
-		http.Error(w, "invalid token", http.StatusUnauthorized)
+	s.tmu.Lock()
+	exp, ok := s.tickets[t]
+	delete(s.tickets, t)
+	s.tmu.Unlock()
+	if t == "" || !ok || time.Now().After(exp) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, signedOutPage)
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: cookieName, Value: s.Token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode,
 	})
+	if s.Logs != nil {
+		s.Logs.Printf("ui: window signed in (%s)", r.UserAgent())
+	}
 	next := r.URL.Query().Get("next")
 	if !strings.HasPrefix(next, "#/") || strings.ContainsAny(next, "\r\n") {
 		next = ""
@@ -443,6 +488,10 @@ func (s *Server) deleteApp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) decidePair(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Access string `json:"access"`
+	}
+	_ = decode(r, &body)
 	var approve bool
 	switch r.PathValue("decision") {
 	case "approve":
@@ -452,7 +501,7 @@ func (s *Server) decidePair(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, errors.New("unknown decision"))
 		return
 	}
-	if err := s.Core.ApprovePair(r.PathValue("id"), approve); err != nil {
+	if err := s.Core.ApprovePair(r.PathValue("id"), approve, body.Access); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
@@ -538,4 +587,206 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	go netx.Pipe(&netx.BufConn{Conn: conn, R: brw.Reader}, up)
+}
+
+func randomHex(n int) string {
+	b := make([]byte, n)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func ctxTimeout(r *http.Request, d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(r.Context(), d)
+}
+
+func (s *Server) setAccess(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Access string `json:"access"`
+		Ports  []int  `json:"ports"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.Core.SetAccess(r.PathValue("node"), body.Access, body.Ports); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	ok(w)
+}
+
+func (s *Server) services(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := ctxTimeout(r, 20*time.Second)
+	defer cancel()
+	v, err := s.Core.Services(ctx, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, v)
+}
+
+func (s *Server) forward(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Port  int    `json:"port"`
+		Label string `json:"label"`
+		Open  bool   `json:"open"`
+	}
+	if err := decode(r, &body); err != nil || !netx.ValidPort(body.Port) {
+		writeErr(w, http.StatusBadRequest, errors.New("invalid port"))
+		return
+	}
+	ctx, cancel := ctxTimeout(r, 45*time.Second)
+	defer cancel()
+	run, err := s.Core.Forward(ctx, r.PathValue("id"), body.Port, body.Label, body.Open)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, run)
+}
+
+func (s *Server) processes(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := ctxTimeout(r, 20*time.Second)
+	defer cancel()
+	v, err := s.Core.Processes(ctx, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, v)
+}
+
+func (s *Server) kill(w http.ResponseWriter, r *http.Request) {
+	pid, err := strconv.Atoi(r.PathValue("pid"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, errors.New("invalid pid"))
+		return
+	}
+	ctx, cancel := ctxTimeout(r, 15*time.Second)
+	defer cancel()
+	if err := s.Core.Kill(ctx, r.PathValue("id"), pid); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	ok(w)
+}
+
+func (s *Server) containers(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := ctxTimeout(r, 20*time.Second)
+	defer cancel()
+	v, err := s.Core.Containers(ctx, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, v)
+}
+
+func (s *Server) containerAction(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := ctxTimeout(r, 70*time.Second)
+	defer cancel()
+	if err := s.Core.ContainerAction(ctx, r.PathValue("id"), r.PathValue("cid"), r.PathValue("action")); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	ok(w)
+}
+
+func (s *Server) wake(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := ctxTimeout(r, 15*time.Second)
+	defer cancel()
+	via, err := s.Core.Wake(ctx, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, map[string]string{"via": via})
+}
+
+func (s *Server) remoteDesktop(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := ctxTimeout(r, 45*time.Second)
+	defer cancel()
+	kind, err := s.Core.RemoteDesktop(ctx, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, map[string]string{"kind": kind})
+}
+
+func (s *Server) diagnose(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := ctxTimeout(r, 60*time.Second)
+	defer cancel()
+	d, err := s.Core.Diagnose(ctx, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, d)
+}
+
+func (s *Server) sendFile(w http.ResponseWriter, r *http.Request) {
+	p, err := s.Core.SendFile(r.Context(), r.PathValue("id"), r.URL.Query().Get("name"), r.ContentLength, r.Body)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, map[string]string{"path": p})
+}
+
+func (s *Server) clipboard(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := ctxTimeout(r, 15*time.Second)
+	defer cancel()
+	switch r.PathValue("dir") {
+	case "push":
+		if err := s.Core.PushClipboard(ctx, r.PathValue("id")); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		ok(w)
+	case "pull":
+		n, err := s.Core.PullClipboard(ctx, r.PathValue("id"))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, map[string]int{"chars": n})
+	default:
+		writeErr(w, http.StatusNotFound, errors.New("unknown direction"))
+	}
+}
+
+func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.Core.Activity(200))
+}
+
+func (s *Server) report(w http.ResponseWriter, r *http.Request) {
+	p, err := s.Core.ReportBundle(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, map[string]string{"path": p})
+}
+
+func (s *Server) updateCheck(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := ctxTimeout(r, 30*time.Second)
+	defer cancel()
+	u, err := s.Core.CheckUpdate(ctx)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, u)
+}
+
+func (s *Server) updateInstall(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := ctxTimeout(r, 15*time.Minute)
+	defer cancel()
+	if err := s.Core.InstallUpdate(ctx, s.Quit); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	ok(w)
 }

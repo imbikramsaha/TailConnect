@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +22,9 @@ import (
 	"tailscale.com/tstest/integration/testcontrol"
 	"tailscale.com/types/logger"
 
+	"github.com/imbikramsaha/tailconnect/internal/agent"
 	"github.com/imbikramsaha/tailconnect/internal/logx"
+	"github.com/imbikramsaha/tailconnect/internal/sshx"
 	"github.com/imbikramsaha/tailconnect/internal/store"
 	"github.com/imbikramsaha/tailconnect/internal/tailnet"
 )
@@ -85,6 +89,7 @@ func newCore(t *testing.T, controlURL, name string, autoTrust bool) *Core {
 		ProbeTailConnect:  time.Second,
 		ProbeOther:        time.Second,
 		Headless:          true,
+		InboxDir:          filepath.Join(dir, "inbox"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -285,10 +290,18 @@ func TestManualPairingApproval(t *testing.T) {
 		}
 		return false
 	})
-	if d, _ := deviceNamed(a, "bravo"); d.Pairing != "waiting" && d.Pairing != "requesting" {
-		t.Errorf("alpha pairing state = %q, want waiting", d.Pairing)
+	waitFor(t, "alpha to show the pairing code", 10*time.Second, func() bool {
+		d, _ := deviceNamed(a, "bravo")
+		return d.Pairing == "waiting" && d.PairCode != ""
+	})
+	da, _ := deviceNamed(a, "bravo")
+	if reqs := b.Snapshot(context.Background()).PairRequests; reqs[0].Code != da.PairCode {
+		t.Errorf("pairing codes differ: requester %q, approver %q", da.PairCode, reqs[0].Code)
 	}
-	if err := b.ApprovePair(reqID, true); err != nil {
+	if st := b.store.Get(); len(st.Pending) != 1 {
+		t.Errorf("pending request not persisted: %+v", st.Pending)
+	}
+	if err := b.ApprovePair(reqID, true, "stats"); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "alpha to save bravo", 20*time.Second, func() bool {
@@ -304,11 +317,187 @@ func TestManualPairingApproval(t *testing.T) {
 		}
 		return false
 	})
-	if err := a.ApprovePair(reqID, true); err != nil {
+	if err := a.ApprovePair(reqID, true, "full"); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "bravo to save alpha", 20*time.Second, func() bool {
 		d, ok := deviceNamed(b, "alpha")
 		return ok && d.Section == SectionMine && d.TrustsUs
 	})
+	// bravo granted alpha monitor-only access.
+	waitFor(t, "alpha to learn its access level", 10*time.Second, func() bool {
+		d, _ := deviceNamed(a, "bravo")
+		return d.Access == "stats"
+	})
+	devB, _ := deviceNamed(a, "bravo")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := a.Stats(ctx, devB.ID); err != nil {
+		t.Errorf("stats with stats access: %v", err)
+	}
+	if _, err := a.Services(ctx, devB.ID); err == nil {
+		t.Error("services allowed with stats access")
+	}
+	if c, err := a.DialDevice(ctx, devB.ID, 22); err == nil {
+		c.Close()
+		t.Error("tunnel allowed with stats access")
+	}
+	if cl, err := sshx.Connect(ctx, a.sshParams(a.mustDevice(t, devB.ID), "")); err == nil {
+		cl.Close()
+		t.Error("built-in SSH allowed with stats access")
+	}
+	if d, _ := deviceNamed(a, "bravo"); d.BuiltinSSH {
+		t.Error("built-in SSH port revealed to a stats-only device")
+	}
+}
+
+func (c *Core) mustDevice(t *testing.T, id string) store.Device {
+	d, ok := c.device(id)
+	if !ok {
+		t.Fatalf("no device %s", id)
+	}
+	return d
+}
+
+func freePort(t *testing.T) (net.Listener, int) {
+	// A fixed range below the ephemeral ports (which service detection skips).
+	for p := 20000 + int(time.Now().UnixNano()%10000); p < 40000; p++ {
+		if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p)); err == nil {
+			return ln, p
+		}
+	}
+	t.Fatal("no free port")
+	return nil, 0
+}
+
+func TestBuiltinSSHServicesFilesAndAccess(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+	url := startControl(t, true)
+	a := newCore(t, url, "alpha", true)
+	b := newCore(t, url, "bravo", true)
+	dumpOnFail = []*Core{a, b}
+	waitFor(t, "auto-pair with built-in SSH", 60*time.Second, func() bool {
+		d, ok := deviceNamed(a, "bravo")
+		return ok && d.Section == SectionMine && d.TrustsUs && d.BuiltinSSH && d.Access == "full"
+	})
+	devB, _ := deviceNamed(a, "bravo")
+	if d := a.mustDevice(t, devB.ID); d.Port != agent.SSHPort {
+		t.Fatalf("device SSH port = %d, want built-in %d", d.Port, agent.SSHPort)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	// Built-in SSH: a real SSH session through the tailnet, no sshd needed.
+	cl, err := sshx.Connect(ctx, a.sshParams(a.mustDevice(t, devB.ID), ""))
+	if err != nil {
+		t.Fatalf("built-in SSH: %v", err)
+	}
+	out, err := sshx.Run(ctx, cl, "echo built-in-ok", nil)
+	cl.Close()
+	if err != nil || strings.TrimSpace(out) != "built-in-ok" {
+		t.Fatalf("ssh run: %q %v", out, err)
+	}
+
+	// Service detection + one-click forward. The service must be another
+	// process: TailConnect hides its own listening ports.
+	ln, port := freePort(t)
+	ln.Close()
+	webDir := t.TempDir()
+	os.WriteFile(filepath.Join(webDir, "index.html"), []byte("svc"), 0o644)
+	web := exec.Command("python3", "-m", "http.server", strconv.Itoa(port), "--bind", "127.0.0.1", "--directory", webDir)
+	if err := web.Start(); err != nil {
+		t.Skipf("python3 not available: %v", err)
+	}
+	defer web.Process.Kill()
+	var svcs []agent.Service
+	waitFor(t, "service detection", 15*time.Second, func() bool {
+		svcs, _ = a.Services(ctx, devB.ID)
+		for _, s := range svcs {
+			if s.Port == port && s.Web {
+				return true
+			}
+		}
+		return false
+	})
+	run, err := a.Forward(ctx, devB.ID, port, "Test", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", run.LocalPort))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "svc" {
+		t.Fatalf("forward body %q", body)
+	}
+
+	// Processes + kill.
+	sleeper := exec.Command("sleep", "120")
+	if err := sleeper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer sleeper.Process.Kill()
+	if ps, err := a.Processes(ctx, devB.ID); err != nil || len(ps) == 0 {
+		t.Fatalf("processes: %d %v", len(ps), err)
+	}
+	if err := a.Kill(ctx, devB.ID, sleeper.Process.Pid); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	waited := make(chan error, 1)
+	go func() { waited <- sleeper.Wait() }()
+	select {
+	case <-waited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("process was not stopped")
+	}
+
+	// Files land in bravo's inbox without overwriting.
+	for i := 0; i < 2; i++ {
+		if _, err := a.SendFile(ctx, devB.ID, "../notes.txt", 5, strings.NewReader("hello")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, n := range []string{"notes.txt", "notes (1).txt"} {
+		if b2, err := os.ReadFile(filepath.Join(b.opts.InboxDir, n)); err != nil || string(b2) != "hello" {
+			t.Errorf("inbox %s: %q %v", n, b2, err)
+		}
+	}
+
+	// Diagnostics measure latency and throughput.
+	diag, err := a.Diagnose(ctx, devB.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diag.LatencyMS) == 0 || diag.SpeedMbps <= 0 || diag.Path == "" {
+		t.Errorf("diagnosis: %+v", diag)
+	}
+
+	// Lowering access to "ports" cuts SSH but keeps forwards.
+	alphaNode := a.Snapshot(ctx).Tailnet.NodeID
+	if err := b.SetAccess(alphaNode, "ports", nil); err != nil {
+		t.Fatal(err)
+	}
+	if cl, err := sshx.Connect(ctx, a.sshParams(a.mustDevice(t, devB.ID), "")); err == nil {
+		cl.Close()
+		t.Error("built-in SSH still allowed with ports access")
+	}
+	if _, err := a.Services(ctx, devB.ID); err != nil {
+		t.Errorf("services with ports access: %v", err)
+	}
+	ak, _ := os.ReadFile(b.opts.AuthorizedKeys)
+	if strings.Contains(string(ak), a.Identity().PublicLine) {
+		t.Error("authorized_keys still has the key after lowering access")
+	}
+	// Port allow-list.
+	if err := b.SetAccess(alphaNode, "ports", []int{port + 1}); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := a.DialDevice(ctx, devB.ID, port); err == nil {
+		c.Close()
+		t.Error("tunnel to a port outside the allow-list succeeded")
+	}
 }

@@ -48,7 +48,49 @@ type Settings struct {
 	Theme string `json:"theme"`
 	// Onboarded is set once the welcome flow is finished.
 	Onboarded bool `json:"onboarded"`
+	// BuiltinSSH serves SSH to paired devices from TailConnect itself, so
+	// terminals and editors work without enabling an SSH server.
+	BuiltinSSH bool `json:"builtinSSH"`
+	// OwnDeviceAccess is the access level granted to auto-paired devices on
+	// the same Tailscale account.
+	OwnDeviceAccess string `json:"ownDeviceAccess"`
+	// Notifications shows system notifications.
+	Notifications bool `json:"notifications"`
+	// CheckUpdates looks for new releases daily.
+	CheckUpdates bool `json:"checkUpdates"`
+	// Alerts watches connected devices' resources.
+	Alerts Alerts `json:"alerts"`
 }
+
+// Alerts are resource thresholds (percent / °C); 0 disables one.
+type Alerts struct {
+	Enabled  bool    `json:"enabled"`
+	GPUTempC float64 `json:"gpuTempC"`
+	DiskPct  float64 `json:"diskPct"`
+	MemPct   float64 `json:"memPct"`
+}
+
+// Access levels a device can be granted on this one.
+const (
+	AccessFull  = "full"  // terminal, editors, files, ports, stats
+	AccessPorts = "ports" // forwarded ports, remote desktop, stats
+	AccessStats = "stats" // resource monitor only
+)
+
+// AccessRank orders access levels (unknown/empty = full, for old state).
+func AccessRank(a string) int {
+	switch a {
+	case AccessStats:
+		return 1
+	case AccessPorts:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// ValidAccess reports whether a is a known access level.
+func ValidAccess(a string) bool { return a == AccessFull || a == AccessPorts || a == AccessStats }
 
 // Device is a saved device. Runtime state (online, links) is not persisted.
 type Device struct {
@@ -67,6 +109,9 @@ type Device struct {
 	// through the system ssh client using their existing alias.
 	Imported bool      `json:"imported,omitempty"`
 	AddedAt  time.Time `json:"addedAt"`
+	// Wake-on-LAN details, remembered while the device was online.
+	MACs []string `json:"macs,omitempty"`
+	LANs []string `json:"lans,omitempty"` // CIDRs, e.g. 192.168.1.0/24
 }
 
 // App is a custom app: a remote port forwarded to localhost, optionally
@@ -79,7 +124,12 @@ type App struct {
 	OpenBrowser bool   `json:"openBrowser"`
 	Path        string `json:"path,omitempty"`
 	InTerminal  bool   `json:"inTerminal"`
+	// Devices limits the app to these device IDs (empty = every device).
+	Devices []string `json:"devices,omitempty"`
 }
+
+// AppliesTo reports whether the app is offered on device id.
+func (a App) AppliesTo(id string) bool { return len(a.Devices) == 0 || slices.Contains(a.Devices, id) }
 
 // TrustedPeer is a device allowed to access this one (stats, tunnels, SSH key).
 type TrustedPeer struct {
@@ -88,6 +138,34 @@ type TrustedPeer struct {
 	LoginName string    `json:"loginName,omitempty"`
 	PublicKey string    `json:"publicKey,omitempty"`
 	TrustedAt time.Time `json:"trustedAt"`
+	// Access is the granted level (see Access*; "" = full for old state).
+	Access string `json:"access,omitempty"`
+	// Ports, if non-empty, limits which local ports the device may tunnel to.
+	Ports []int `json:"ports,omitempty"`
+}
+
+// Level returns the effective access level.
+func (t TrustedPeer) Level() string {
+	if ValidAccess(t.Access) {
+		return t.Access
+	}
+	return AccessFull
+}
+
+// Pending is a pairing request awaiting the user's decision (persisted so a
+// restart doesn't lose it).
+type Pending struct {
+	ID        string    `json:"id"`
+	NodeID    string    `json:"nodeID"`
+	NodeName  string    `json:"nodeName"`
+	LoginName string    `json:"loginName"`
+	UserID    int64     `json:"userID"`
+	Name      string    `json:"name"`
+	OS        string    `json:"os"`
+	PublicKey string    `json:"publicKey"`
+	Code      string    `json:"code"`
+	Status    string    `json:"status"`
+	Created   time.Time `json:"created"`
 }
 
 // State is everything persisted.
@@ -99,25 +177,58 @@ type State struct {
 	Trusted  []TrustedPeer `json:"trusted"`
 	// Ignored lists tailnet node IDs the user removed; they are not auto-paired again.
 	Ignored []string `json:"ignored,omitempty"`
+	// Pending are pairing requests made to this device.
+	Pending []Pending `json:"pending,omitempty"`
 }
+
+// stateVersion is the current schema version.
+const stateVersion = 2
 
 // DefaultApps are the built-in launchers enabled on first run.
 var DefaultApps = []string{"terminal", "vscode", "cursor"}
 
 func defaults() State {
 	return State{
-		Version: 1,
+		Version: stateVersion,
 		Settings: Settings{
 			AutoTrustOwnDevices: true,
 			EnabledApps:         slices.Clone(DefaultApps),
 			ManageSSHConfig:     true,
 			LocalSSHPort:        22,
 			Theme:               "system",
+			BuiltinSSH:          true,
+			OwnDeviceAccess:     AccessFull,
+			Notifications:       true,
+			CheckUpdates:        true,
+			Alerts:              DefaultAlerts(),
 		},
 		Apps: []App{
 			{ID: "jupyter", Name: "JupyterLab", Port: 8888, OpenBrowser: true,
 				Script: "jupyter lab --no-browser --port=8888 --ServerApp.token='' --ServerApp.password=''"},
 		},
+	}
+}
+
+// DefaultAlerts are the default resource alert thresholds.
+func DefaultAlerts() Alerts {
+	return Alerts{Enabled: true, GPUTempC: 85, DiskPct: 95, MemPct: 95}
+}
+
+// migrate upgrades state written by older versions.
+func migrate(st *State) {
+	if st.Version < 2 {
+		st.Settings.BuiltinSSH = true
+		st.Settings.OwnDeviceAccess = AccessFull
+		st.Settings.Notifications = true
+		st.Settings.CheckUpdates = true
+		st.Settings.Alerts = DefaultAlerts()
+		st.Version = 2
+	}
+	if !ValidAccess(st.Settings.OwnDeviceAccess) {
+		st.Settings.OwnDeviceAccess = AccessFull
+	}
+	if st.Settings.LocalSSHPort == 0 {
+		st.Settings.LocalSSHPort = 22
 	}
 }
 
@@ -138,11 +249,16 @@ func Open(path string) (*Store, error) {
 	case err != nil:
 		return nil, err
 	}
+	s.st = State{} // fields absent from the file stay zero; migrate fills them
 	if err := json.Unmarshal(b, &s.st); err != nil {
 		return nil, err
 	}
-	if s.st.Settings.LocalSSHPort == 0 {
-		s.st.Settings.LocalSSHPort = 22
+	before := s.st.Version
+	migrate(&s.st)
+	if before != s.st.Version {
+		if err := s.saveLocked(); err != nil {
+			return nil, err
+		}
 	}
 	return s, nil
 }
@@ -185,6 +301,17 @@ func clone(st State) State {
 	st.Apps = slices.Clone(st.Apps)
 	st.Trusted = slices.Clone(st.Trusted)
 	st.Ignored = slices.Clone(st.Ignored)
+	st.Pending = slices.Clone(st.Pending)
+	for i := range st.Trusted {
+		st.Trusted[i].Ports = slices.Clone(st.Trusted[i].Ports)
+	}
+	for i := range st.Apps {
+		st.Apps[i].Devices = slices.Clone(st.Apps[i].Devices)
+	}
+	for i := range st.Devices {
+		st.Devices[i].MACs = slices.Clone(st.Devices[i].MACs)
+		st.Devices[i].LANs = slices.Clone(st.Devices[i].LANs)
+	}
 	return st
 }
 
@@ -227,6 +354,16 @@ func (st State) FindDeviceByNode(nodeID string) int {
 // FindApp returns the index of the app with id, or -1.
 func (st State) FindApp(id string) int {
 	return slices.IndexFunc(st.Apps, func(a App) bool { return a.ID == id })
+}
+
+// Trust returns the trusted entry for nodeID.
+func (st *State) Trust(nodeID string) (TrustedPeer, bool) {
+	for _, t := range st.Trusted {
+		if nodeID != "" && t.NodeID == nodeID {
+			return t, true
+		}
+	}
+	return TrustedPeer{}, false
 }
 
 // IsTrusted reports whether nodeID may access this device.

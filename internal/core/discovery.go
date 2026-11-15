@@ -128,6 +128,14 @@ func (c *Core) refresh() {
 
 	if len(toProbe) > 0 {
 		c.probe(toProbe)
+		st := c.store.Get()
+		for _, p := range toProbe {
+			if i := st.FindDeviceByNode(p.NodeID); i >= 0 {
+				if pp, ok := c.peer(p.NodeID); ok && pp.Hello != nil && pp.Hello.Trusted {
+					c.applyHello(st.Devices[i], pp.Hello)
+				}
+			}
+		}
 	}
 	c.expirePending()
 	c.autoPair()
@@ -167,13 +175,16 @@ func (c *Core) probe(list []*peerInfo) {
 // autoPair pairs with TailConnect devices of the same Tailscale user.
 func (c *Core) autoPair() {
 	st := c.store.Get()
-	if !st.Settings.AutoTrustOwnDevices {
-		return
-	}
 	var ids []string
 	c.mu.Lock()
 	for id, p := range c.peers {
-		if p.Hello == nil || !p.Online || p.Tagged || p.UserID == 0 || p.UserID != c.selfUserID {
+		if p.Hello == nil || !p.Online {
+			continue
+		}
+		// A device that already trusts us (e.g. approved our request after
+		// we stopped waiting, or after a restart) just needs saving.
+		trustsUnsaved := p.Hello.Trusted && st.FindDeviceByNode(id) < 0
+		if !trustsUnsaved && (!st.Settings.AutoTrustOwnDevices || p.Tagged || p.UserID == 0 || p.UserID != c.selfUserID) {
 			continue
 		}
 		if st.FindDeviceByNode(id) >= 0 && p.Hello.Trusted {

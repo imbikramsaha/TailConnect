@@ -19,6 +19,7 @@ import (
 	"github.com/imbikramsaha/tailconnect/internal/core"
 	"github.com/imbikramsaha/tailconnect/internal/paths"
 	"github.com/imbikramsaha/tailconnect/internal/store"
+	"github.com/imbikramsaha/tailconnect/internal/window"
 )
 
 // control is the running instance's advertisement in control.json.
@@ -144,6 +145,12 @@ func runCLI(args []string) int {
 		return 0
 	case "version":
 		fmt.Println("tailconnect", version)
+		return 0
+	case "window":
+		// Internal: the native window process (started by the app).
+		if err := window.Run(os.Stdin); err != nil {
+			return fatal(err)
+		}
 		return 0
 	case "proxy":
 		if len(rest) != 2 {

@@ -71,11 +71,22 @@ func TestServerAuthAndRoutes(t *testing.T) {
 		t.Errorf("unauthenticated api: %d", r.StatusCode)
 	}
 	if r, _ := do(t, "GET", base+"/auth?t=wrong", nil); r.StatusCode != 401 {
-		t.Errorf("bad token: %d", r.StatusCode)
+		t.Errorf("bad ticket: %d", r.StatusCode)
 	}
-	r, _ := do(t, "GET", base+"/auth?t="+s.Token+"&next=%23%2Fsettings", nil)
+	// The long-lived API token is never accepted as a sign-in ticket.
+	if r, _ := do(t, "GET", base+"/auth?t="+s.Token, nil); r.StatusCode != 401 {
+		t.Errorf("token accepted as ticket: %d", r.StatusCode)
+	}
+	login := s.LoginURL("#/settings")
+	if strings.Contains(login, s.Token) {
+		t.Fatal("login URL contains the API token")
+	}
+	r, _ := do(t, "GET", login, nil)
 	if r.StatusCode != 302 || r.Header.Get("Location") != "/#/settings" {
 		t.Fatalf("auth redirect: %d %q", r.StatusCode, r.Header.Get("Location"))
+	}
+	if r2, _ := do(t, "GET", login, nil); r2.StatusCode != 401 {
+		t.Errorf("ticket reused: %d", r2.StatusCode)
 	}
 	var cookie string
 	for _, c := range r.Cookies() {

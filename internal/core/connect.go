@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/imbikramsaha/tailconnect/internal/agent"
 	"github.com/imbikramsaha/tailconnect/internal/sshx"
 	"github.com/imbikramsaha/tailconnect/internal/store"
 )
@@ -170,19 +172,7 @@ func (c *Core) establish(ctx context.Context, dev store.Device, cs *connState) e
 		if !h.Trusted {
 			return errors.New("this device no longer trusts you; remove it and pair again")
 		}
-		if h.User != dev.User || h.Home != dev.Home || (h.SSHPort != 0 && h.SSHPort != dev.Port) || h.OS != dev.OS {
-			_ = c.store.Update(func(st *store.State) error {
-				if i := st.FindDevice(dev.ID); i >= 0 {
-					d := &st.Devices[i]
-					d.User, d.Home, d.OS = h.User, h.Home, h.OS
-					if h.SSHPort != 0 {
-						d.Port = h.SSHPort
-					}
-				}
-				return nil
-			})
-			_ = c.writeSSHConfig()
-		}
+		c.applyHello(dev, h)
 		return nil
 	case store.KindSSH:
 		cl, err := sshx.Connect(ctx, c.sshParams(dev, ""))
@@ -349,6 +339,10 @@ func (c *Core) DialDevice(ctx context.Context, id string, port int) (net.Conn, e
 		if !ok || p.IP == "" {
 			return nil, errors.New("device is offline")
 		}
+		if port == agent.SSHPort {
+			// The built-in SSH server listens on the tailnet itself.
+			return c.node.Dial(ctx, "tcp", net.JoinHostPort(p.IP, strconv.Itoa(port)))
+		}
 		return c.agentCli.Tunnel(ctx, p.IP, port)
 	case dev.Via == store.ViaTailnet:
 		if !c.node.Running() {
@@ -418,5 +412,38 @@ func ErrNoSSH(dev store.Device) error {
 	case "windows":
 		hint = "enable Settings → System → Optional features → OpenSSH Server, then start the sshd service"
 	}
-	return fmt.Errorf("%s has no SSH server running: %s", dev.Name, hint)
+	return fmt.Errorf("%s has no SSH server available: turn on \"Built-in SSH\" in TailConnect's settings on that device, or %s", dev.Name, hint)
+}
+
+// applyHello updates a saved peer from its latest hello: login details,
+// which SSH server to use, and Wake-on-LAN info.
+func (c *Core) applyHello(dev store.Device, h *agent.Hello) {
+	port := h.SSHPort
+	if h.BuiltinSSH > 0 {
+		port = h.BuiltinSSH
+	}
+	if port == 0 {
+		port = 22
+	}
+	macs, lans := dev.MACs, dev.LANs
+	if len(h.MACs) > 0 {
+		macs, lans = h.MACs, h.LANs
+	}
+	if h.User == dev.User && h.Home == dev.Home && h.OS == dev.OS && port == dev.Port &&
+		slices.Equal(macs, dev.MACs) && slices.Equal(lans, dev.LANs) {
+		return
+	}
+	if port != dev.Port && dev.Port != 0 {
+		_ = c.known.Forget(dev.Alias) // different SSH server, different host key
+	}
+	_ = c.store.Update(func(st *store.State) error {
+		if i := st.FindDevice(dev.ID); i >= 0 {
+			d := &st.Devices[i]
+			d.User, d.Home, d.OS, d.Port, d.MACs, d.LANs = h.User, h.Home, h.OS, port, macs, lans
+		}
+		return nil
+	})
+	if err := c.writeSSHConfig(); err != nil {
+		c.logs.Printf("ssh config: %v", err)
+	}
 }

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -24,6 +25,7 @@ import (
 	"github.com/imbikramsaha/tailconnect/internal/hostname"
 	"github.com/imbikramsaha/tailconnect/internal/launch"
 	"github.com/imbikramsaha/tailconnect/internal/logx"
+	"github.com/imbikramsaha/tailconnect/internal/notify"
 	"github.com/imbikramsaha/tailconnect/internal/paths"
 	"github.com/imbikramsaha/tailconnect/internal/sshconf"
 	"github.com/imbikramsaha/tailconnect/internal/sshkeys"
@@ -31,6 +33,7 @@ import (
 	"github.com/imbikramsaha/tailconnect/internal/tailnet"
 	"github.com/imbikramsaha/tailconnect/internal/tray"
 	"github.com/imbikramsaha/tailconnect/internal/ui"
+	"github.com/imbikramsaha/tailconnect/internal/window"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -181,6 +184,7 @@ func runApp(headless, background bool, authKey string) int {
 		UserSSHConfig:  userSSHConfig,
 		Headless:       headless,
 		InstallWarning: installWarning(executable()),
+		Notify:         notifier(headless),
 	})
 	if err != nil {
 		return fatal(err)
@@ -210,15 +214,25 @@ func runApp(headless, background bool, authKey string) int {
 	logs.Printf("TailConnect %s ready (control API on 127.0.0.1:%d)", version, srv.Port())
 
 	profile := filepath.Join(cfgDir, "ui-profile")
+	win := &windowProc{exe: executable(), logf: logs.Printf}
 	showUI := func(route string) {
 		if headless {
 			return
+		}
+		if window.Supported() {
+			if err := win.show(srv.LoginURL(route)); err == nil {
+				return
+			} else {
+				logs.Printf("native window: %v; using browser", err)
+			}
 		}
 		if err := launch.AppWindow(srv.LoginURL(route), profile); err != nil {
 			logs.Printf("open window: %v", err)
 		}
 	}
 	srv.ShowUI = showUI
+	notify.OnClick(showUI)
+	defer win.close()
 
 	quit := make(chan struct{})
 	var once sync.Once
@@ -299,4 +313,71 @@ func installWarning(exe string) string {
 		return "TailConnect is running from a temporary location. Quit it, drag TailConnect to your Applications folder, and open it from there."
 	}
 	return ""
+}
+
+func notifier(headless bool) func(title, body, route string) error {
+	if headless {
+		return func(title, body, _ string) error {
+			fmt.Fprintf(os.Stderr, "%s: %s\n", title, body)
+			return nil
+		}
+	}
+	return notify.Send
+}
+
+// windowProc manages the single native window process.
+type windowProc struct {
+	exe  string
+	logf func(string, ...any)
+
+	mu    sync.Mutex
+	cmd   *exec.Cmd
+	stdin io.WriteCloser
+	done  chan struct{}
+}
+
+// show opens the window at url, or navigates/raises the existing one.
+func (w *windowProc) show(url string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.cmd != nil {
+		select {
+		case <-w.done:
+			w.cmd = nil
+		default:
+			if _, err := io.WriteString(w.stdin, url+"\n"); err == nil {
+				return nil
+			}
+			w.cmd = nil
+		}
+	}
+	cmd := exec.Command(w.exe, "window")
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	done := make(chan struct{})
+	go func() {
+		if err := cmd.Wait(); err != nil {
+			w.logf("window exited: %v", err)
+		}
+		close(done)
+	}()
+	if _, err := io.WriteString(in, url+"\n"); err != nil {
+		return err
+	}
+	w.cmd, w.stdin, w.done = cmd, in, done
+	return nil
+}
+
+// close closes the window (it exits when its stdin closes).
+func (w *windowProc) close() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.stdin != nil {
+		w.stdin.Close()
+	}
 }

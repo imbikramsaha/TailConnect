@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -27,7 +28,9 @@ type running struct {
 	Status     string    `json:"status"` // starting | running | error
 	Error      string    `json:"error,omitempty"`
 	StartedAt  time.Time `json:"startedAt"`
-	fwd        *forward.Forward
+	// AdHoc marks forwards started without a saved app (detected services).
+	AdHoc bool `json:"adHoc,omitempty"`
+	fwd   *forward.Forward
 }
 
 // remote paths (relative to $HOME) used for custom app scripts and logs.
@@ -43,10 +46,18 @@ func (c *Core) SaveApp(a store.App) (store.App, error) {
 		return a, errors.New("port must be between 1 and 65535")
 	}
 	a.Path = strings.TrimPrefix(strings.TrimSpace(a.Path), "/")
+	a.Devices = slices.Compact(slices.Sorted(slices.Values(a.Devices)))
 	err := c.store.Update(func(st *store.State) error {
 		for _, o := range st.Apps {
-			if o.Port == a.Port && o.ID != a.ID {
+			overlap := len(o.Devices) == 0 || len(a.Devices) == 0 ||
+				slices.ContainsFunc(a.Devices, func(d string) bool { return slices.Contains(o.Devices, d) })
+			if o.Port == a.Port && o.ID != a.ID && overlap {
 				return fmt.Errorf("port %d is already used by %q", a.Port, o.Name)
+			}
+		}
+		for _, d := range a.Devices {
+			if st.FindDevice(d) < 0 {
+				return fmt.Errorf("unknown device %q", d)
 			}
 		}
 		if a.ID == "" {
@@ -102,6 +113,9 @@ func (c *Core) StartApp(ctx context.Context, deviceID, appID string) (*running, 
 	dev, ok := c.device(deviceID)
 	if !ok {
 		return nil, errors.New("unknown device")
+	}
+	if !app.AppliesTo(deviceID) {
+		return nil, fmt.Errorf("%q isn't set up for %s", app.Name, dev.Name)
 	}
 	if err := c.ensureConnected(ctx, deviceID); err != nil {
 		return nil, err

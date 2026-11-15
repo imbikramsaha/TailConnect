@@ -64,6 +64,23 @@ type GPU struct {
 var skipFS = map[string]bool{
 	"tmpfs": true, "devtmpfs": true, "squashfs": true, "overlay": true, "proc": true,
 	"sysfs": true, "devfs": true, "autofs": true, "nullfs": true, "efivarfs": true, "ramfs": true,
+	"devicefs": true,
+}
+
+// userVisible reports whether a partition is one a user thinks of as a disk.
+func userVisible(p disk.PartitionStat) bool {
+	if skipFS[p.Fstype] {
+		return false
+	}
+	for _, o := range p.Opts {
+		if o == "nobrowse" { // macOS system/hidden volumes (Finder hides them too)
+			return false
+		}
+	}
+	m := p.Mountpoint
+	return !strings.HasPrefix(m, "/snap/") && !strings.HasPrefix(m, "/boot") &&
+		!strings.HasPrefix(m, "/System/Volumes/") && !strings.HasPrefix(m, "/private/var/") &&
+		!strings.HasPrefix(m, "/var/lib/docker") && !strings.HasPrefix(m, "/run/")
 }
 
 // Collect gathers a snapshot. It takes ~sample to measure CPU usage.
@@ -103,8 +120,7 @@ func Collect(ctx context.Context, sample time.Duration) (*Stats, error) {
 	if parts, err := disk.PartitionsWithContext(ctx, false); err == nil {
 		seen := map[string]bool{}
 		for _, p := range parts {
-			if skipFS[p.Fstype] || seen[p.Device] || strings.HasPrefix(p.Mountpoint, "/snap/") ||
-				strings.HasPrefix(p.Mountpoint, "/boot/efi") || strings.HasPrefix(p.Mountpoint, "/System/Volumes/") && p.Mountpoint != "/System/Volumes/Data" {
+			if !userVisible(p) || seen[p.Device] {
 				continue
 			}
 			u, err := disk.UsageWithContext(ctx, p.Mountpoint)

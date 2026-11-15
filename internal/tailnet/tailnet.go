@@ -15,6 +15,7 @@ import (
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/ipn/store/mem"
+	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 	"tailscale.com/types/logger"
 )
@@ -365,4 +366,12 @@ func LinkDescription(p *ipnstate.PeerStatus) string {
 	default:
 		return "Tailscale"
 	}
+}
+
+// Ping sends a Tailscale disco ping to ip (path discovery + latency).
+func (n *Node) Ping(ctx context.Context, ip netip.Addr) (*ipnstate.PingResult, error) {
+	if n.lc == nil {
+		return nil, errors.New("tailnet not started")
+	}
+	return n.lc.Ping(ctx, ip, tailcfg.PingDisco)
 }

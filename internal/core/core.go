@@ -5,6 +5,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -26,6 +27,7 @@ import (
 	"github.com/imbikramsaha/tailconnect/internal/launch"
 	"github.com/imbikramsaha/tailconnect/internal/logx"
 	"github.com/imbikramsaha/tailconnect/internal/sshconf"
+	"github.com/imbikramsaha/tailconnect/internal/sshd"
 	"github.com/imbikramsaha/tailconnect/internal/sshkeys"
 	"github.com/imbikramsaha/tailconnect/internal/store"
 	"github.com/imbikramsaha/tailconnect/internal/tailnet"
@@ -56,6 +58,12 @@ type Options struct {
 	Headless bool
 	// InstallWarning, if set, is shown in the UI (e.g. "move to Applications").
 	InstallWarning string
+	// Notify shows a system notification (nil = none).
+	Notify func(title, body, route string) error
+	// AlertInterval is how often connected devices are checked for alerts.
+	AlertInterval time.Duration
+	// InboxDir receives files from other devices ("" = ~/Downloads/TailConnect).
+	InboxDir string
 }
 
 // Core is the running engine.
@@ -80,10 +88,14 @@ type Core struct {
 	mu         sync.Mutex
 	peers      map[string]*peerInfo  // by StableNodeID
 	conns      map[string]*connState // by device ID
-	incoming   map[string]*incoming  // pairing requests to this device, by request ID
 	outgoing   map[string]*outgoing  // our pairing requests, by node ID
 	selfUserID int64
 	selfNodeID string
+
+	sshMu  sync.Mutex
+	sshSrv *sshd.Server
+	update UpdateInfo
+	alerts map[string]time.Time // alert key -> last fired
 }
 
 // New prepares a Core; call Start to bring it up.
@@ -102,6 +114,9 @@ func New(opts Options) (*Core, error) {
 	}
 	if opts.OpenURL == nil {
 		opts.OpenURL = launch.OpenURL
+	}
+	if opts.AlertInterval == 0 {
+		opts.AlertInterval = time.Minute
 	}
 	name := opts.Store.Get().Settings.Hostname
 	if name == "" {
@@ -128,7 +143,7 @@ func New(opts Options) (*Core, error) {
 		kick:     make(chan struct{}, 1),
 		peers:    map[string]*peerInfo{},
 		conns:    map[string]*connState{},
-		incoming: map[string]*incoming{},
+		alerts:   map[string]time.Time{},
 		outgoing: map[string]*outgoing{},
 	}
 	if u, err := user.Current(); err == nil {
@@ -161,7 +176,7 @@ func (c *Core) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("agent listener: %w", err)
 	}
-	c.agentSrv = &agent.Server{ID: c, Host: c, Logf: c.logs.Printf}
+	c.agentSrv = &agent.Server{ID: c, Host: c, Ops: hostOps{inbox: c.opts.InboxDir}, Logf: c.logs.Printf}
 	go func() {
 		if err := c.agentSrv.Serve(ln); err != nil {
 			c.logs.Printf("agent server: %v", err)
@@ -175,7 +190,12 @@ func (c *Core) Start(ctx context.Context) error {
 			c.logs.Printf("autostart: %v", err)
 		}
 	}
+	if err := c.syncBuiltinSSH(); err != nil {
+		c.logs.Printf("built-in SSH: %v", err)
+	}
 	go c.discoveryLoop()
+	go c.alertLoop()
+	go c.updateLoop()
 	return nil
 }
 
@@ -199,6 +219,7 @@ func (c *Core) Close() {
 	if c.agentSrv != nil {
 		c.agentSrv.Close()
 	}
+	c.stopBuiltinSSH()
 	c.node.Close()
 }
 
@@ -281,6 +302,11 @@ func (c *Core) UpdateSettings(fn func(*store.Settings)) error {
 			}
 		}
 	}
+	if before.BuiltinSSH != after.BuiltinSSH {
+		if err := c.syncBuiltinSSH(); err != nil {
+			errs = append(errs, fmt.Errorf("built-in SSH: %w", err))
+		}
+	}
 	if !after.AutoTrustOwnDevices && before.AutoTrustOwnDevices {
 		c.logs.Session.Printf("auto-trust of own devices disabled")
 	}
@@ -320,3 +346,100 @@ func sshClientOK(cl *ssh.Client) bool {
 }
 
 func osName() string { return runtime.GOOS }
+
+// notify shows a system notification if enabled.
+func (c *Core) notify(title, body, route string) {
+	if c.opts.Notify == nil || !c.store.Get().Settings.Notifications {
+		return
+	}
+	if err := c.opts.Notify(title, body, route); err != nil {
+		c.logs.Printf("notification: %v", err)
+	}
+}
+
+// ---- built-in SSH server ----
+
+func (c *Core) builtinSSHRunning() bool {
+	c.sshMu.Lock()
+	defer c.sshMu.Unlock()
+	return c.sshSrv != nil
+}
+
+// BuiltinSSHSupported reports whether this OS can run the built-in server.
+func BuiltinSSHSupported() bool { return sshd.Supported() }
+
+// syncBuiltinSSH starts or stops the built-in SSH server to match settings.
+func (c *Core) syncBuiltinSSH() error {
+	want := c.store.Get().Settings.BuiltinSSH && sshd.Supported()
+	if !want {
+		c.stopBuiltinSSH()
+		return nil
+	}
+	c.sshMu.Lock()
+	defer c.sshMu.Unlock()
+	if c.sshSrv != nil {
+		return nil
+	}
+	hk, err := sshkeys.LoadOrCreate(filepath.Join(c.opts.SSHDir, "host"), "tailconnect-host")
+	if err != nil {
+		return err
+	}
+	ln, err := c.node.Listen("tcp", fmt.Sprintf(":%d", agent.SSHPort))
+	if err != nil {
+		return err
+	}
+	srv := &sshd.Server{
+		HostKey:   hk.Signer,
+		Auth:      c.authorizeSSH,
+		Logf:      c.logs.Printf,
+		OnSession: func(peer, kind string) { c.logs.Session.Printf("%s opened an SSH %s", peer, kind) },
+	}
+	c.sshSrv = srv
+	go func() {
+		if err := srv.Serve(ln); err != nil {
+			c.logs.Printf("built-in SSH: %v", err)
+		}
+	}()
+	return nil
+}
+
+func (c *Core) stopBuiltinSSH() {
+	c.sshMu.Lock()
+	srv := c.sshSrv
+	c.sshSrv = nil
+	c.sshMu.Unlock()
+	if srv != nil {
+		srv.Close()
+	}
+}
+
+// dropSSHSessions closes built-in SSH connections after access changes
+// (simplest correct approach: restart the server).
+func (c *Core) dropSSHSessions(string) {
+	if !c.builtinSSHRunning() {
+		return
+	}
+	c.stopBuiltinSSH()
+	if err := c.syncBuiltinSSH(); err != nil {
+		c.logs.Printf("built-in SSH restart: %v", err)
+	}
+}
+
+// authorizeSSH admits a built-in SSH login only from a paired device with
+// full access presenting the key it paired with.
+func (c *Core) authorizeSSH(ctx context.Context, remoteAddr string, key ssh.PublicKey) (string, error) {
+	cl, err := c.Identify(ctx, remoteAddr)
+	if err != nil {
+		return "", errors.New("unknown tailnet caller")
+	}
+	st := c.store.Get()
+	t, ok := st.Trust(cl.NodeID)
+	if !ok || t.Level() != store.AccessFull {
+		return "", errors.New("device does not have full access")
+	}
+	want, _, _, _, err := ssh.ParseAuthorizedKey([]byte(t.PublicKey))
+	if err != nil || !bytes.Equal(want.Marshal(), key.Marshal()) {
+		return "", errors.New("key does not match the paired device")
+	}
+	return t.Name, nil
+}

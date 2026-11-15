@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/imbikramsaha/tailconnect/internal/hostops"
 	"github.com/imbikramsaha/tailconnect/internal/launch"
 	"github.com/imbikramsaha/tailconnect/internal/netx"
 	"github.com/imbikramsaha/tailconnect/internal/store"
@@ -50,7 +51,14 @@ type DeviceView struct {
 	Link        string    `json:"link,omitempty"`
 	Pairing     string    `json:"pairing,omitempty"`
 	PairingMsg  string    `json:"pairingMsg,omitempty"`
+	PairCode    string    `json:"pairCode,omitempty"`
 	Running     []running `json:"running"`
+	// Access is what this computer may do on the device ("" = nothing).
+	Access string `json:"access,omitempty"`
+	// TheirAccess is what the device may do on this computer.
+	TheirAccess string `json:"theirAccess,omitempty"`
+	BuiltinSSH  bool   `json:"builtinSSH"`
+	CanWake     bool   `json:"canWake"`
 }
 
 // BuiltinView is a built-in launcher.
@@ -69,20 +77,23 @@ type PairRequestView struct {
 	LoginName string    `json:"loginName"`
 	OS        string    `json:"os"`
 	SameUser  bool      `json:"sameUser"`
+	Code      string    `json:"code"`
 	Created   time.Time `json:"created"`
 }
 
 // SelfView describes this device.
 type SelfView struct {
-	Name       string `json:"name"`
-	OS         string `json:"os"`
-	Arch       string `json:"arch"`
-	User       string `json:"user"`
-	SSH        bool   `json:"ssh"`
-	SSHPort    int    `json:"sshPort"`
-	PublicKey  string `json:"publicKey"`
-	SSHConfig  string `json:"sshConfig"`
-	ConfigPath string `json:"configPath,omitempty"`
+	Name                string `json:"name"`
+	OS                  string `json:"os"`
+	Arch                string `json:"arch"`
+	User                string `json:"user"`
+	SSH                 bool   `json:"ssh"`
+	SSHPort             int    `json:"sshPort"`
+	PublicKey           string `json:"publicKey"`
+	BuiltinSSH          bool   `json:"builtinSSH"`
+	BuiltinSSHSupported bool   `json:"builtinSSHSupported"`
+	SSHConfig           string `json:"sshConfig"`
+	ConfigPath          string `json:"configPath,omitempty"`
 }
 
 // View is the full UI state.
@@ -101,6 +112,8 @@ type View struct {
 	Headless        bool                `json:"headless"`
 	LogDir          string              `json:"logDir,omitempty"`
 	InstallWarning  string              `json:"installWarning,omitempty"`
+	Update          UpdateInfo          `json:"update"`
+	InboxDir        string              `json:"inboxDir,omitempty"`
 }
 
 var (
@@ -139,8 +152,15 @@ func (c *Core) Snapshot(ctx context.Context) View {
 			Name: c.selfName, OS: runtime.GOOS, Arch: runtime.GOARCH, User: c.osUser,
 			SSH: netx.PortOpen(st.Settings.LocalSSHPort), SSHPort: st.Settings.LocalSSHPort,
 			PublicKey: c.id.PublicLine, SSHConfig: c.managedConfigPath(),
+			BuiltinSSH: c.builtinSSHRunning(), BuiltinSSHSupported: BuiltinSSHSupported(),
 		},
+		Update: c.updateInfo(),
 	}
+	v.InboxDir = c.opts.InboxDir
+	if v.InboxDir == "" {
+		v.InboxDir, _ = hostops.InboxDir()
+	}
+	_, selfLANs := c.lanInfo()
 	if c.logs != nil {
 		v.LogDir = c.logs.Dir
 	}
@@ -169,14 +189,21 @@ func (c *Core) Snapshot(ctx context.Context) View {
 			saved[d.NodeID] = true
 			dv.TailConnect = true
 			dv.TrustedByUs = st.IsTrusted(d.NodeID)
+			if t, ok := st.Trust(d.NodeID); ok {
+				dv.TheirAccess = t.Level()
+			}
 			if p := c.peers[d.NodeID]; p != nil {
 				dv.Online, dv.TailnetIP, dv.DNSName, dv.Link, dv.LoginName = p.Online, p.IP, p.DNSName, p.Link, p.LoginName
 				if p.Hello != nil {
-					dv.SSH, dv.TrustsUs, dv.Version = p.Hello.SSH, p.Hello.Trusted, p.Hello.Version
+					dv.SSH, dv.TrustsUs, dv.Version = p.Hello.SSH || p.Hello.BuiltinSSH > 0, p.Hello.Trusted, p.Hello.Version
+					dv.Access, dv.BuiltinSSH = p.Hello.Access, p.Hello.BuiltinSSH > 0
 				}
 			}
 			if o := c.outgoing[d.NodeID]; o != nil && o.Status != outDone {
-				dv.Pairing, dv.PairingMsg = o.Status, o.Message
+				dv.Pairing, dv.PairingMsg, dv.PairCode = o.Status, o.Message, o.Code
+			}
+			if !dv.Online {
+				_, _, dv.CanWake = c.wakePlanLocked(d, selfLANs)
 			}
 		case store.KindSSH:
 			dv.SSH = true
@@ -215,9 +242,10 @@ func (c *Core) Snapshot(ctx context.Context) View {
 			dv.Section = SectionDiscovered
 			dv.TailConnect = true
 			dv.OS = p.Hello.OS
-			dv.SSH, dv.TrustsUs, dv.Version = p.Hello.SSH, p.Hello.Trusted, p.Hello.Version
+			dv.SSH, dv.TrustsUs, dv.Version = p.Hello.SSH || p.Hello.BuiltinSSH > 0, p.Hello.Trusted, p.Hello.Version
+			dv.Access = p.Hello.Access
 			if o := c.outgoing[id]; o != nil && o.Status != outDone {
-				dv.Pairing, dv.PairingMsg = o.Status, o.Message
+				dv.Pairing, dv.PairingMsg, dv.PairCode = o.Status, o.Message, o.Code
 			}
 		} else {
 			dv.Section = SectionTailnet
@@ -237,13 +265,13 @@ func (c *Core) Snapshot(ctx context.Context) View {
 		}
 		return strings.ToLower(a.Name) < strings.ToLower(b.Name)
 	})
-	for _, in := range c.incoming {
+	for _, in := range st.Pending {
 		if in.Status != "pending" {
 			continue
 		}
 		v.PairRequests = append(v.PairRequests, PairRequestView{
-			ID: in.ID, Name: in.Req.Name, NodeName: in.Caller.Name, LoginName: in.Caller.LoginName,
-			OS: in.Req.OS, SameUser: in.Caller.UserID != 0 && in.Caller.UserID == c.selfUserID, Created: in.Created,
+			ID: in.ID, Name: in.Name, NodeName: in.NodeName, LoginName: in.LoginName, Code: in.Code,
+			OS: in.OS, SameUser: in.UserID != 0 && in.UserID == c.selfUserID, Created: in.Created,
 		})
 	}
 	sort.Slice(v.PairRequests, func(i, j int) bool { return v.PairRequests[i].Created.Before(v.PairRequests[j].Created) })

@@ -40,8 +40,13 @@ jobs:
         with:
           go-version-file: go.mod
       - run: scripts/build-macos.sh "${GITHUB_REF_NAME}"
+      - name: Homebrew cask
+        run: scripts/update-cask.sh "${GITHUB_REF_NAME#v}" | tee dist/tailconnect.rb
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.dmg
+          files: |
+            dist/*.dmg
+            dist/SHA256SUMS
+            dist/tailconnect.rb
           prerelease: true
           generate_release_notes: true

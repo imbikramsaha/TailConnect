@@ -276,3 +276,43 @@ func start(bin string, args ...string) error {
 	go cmd.Wait() // reap
 	return nil
 }
+
+// Reveal shows a file in the system file manager.
+func Reveal(p string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return start("open", "-R", p)
+	case "windows":
+		return start("explorer", "/select,", p)
+	default:
+		return start("xdg-open", filepath.Dir(p))
+	}
+}
+
+// OpenRDP opens a Remote Desktop client for host:port.
+func OpenRDP(host string, port int) error {
+	addr := fmt.Sprintf("%s:%d", host, port)
+	switch runtime.GOOS {
+	case "windows":
+		return start("mstsc", "/v:"+addr)
+	case "darwin":
+		// Handled by Microsoft's "Windows App" / Remote Desktop.
+		return start("open", "rdp://full%20address=s:"+addr)
+	default:
+		if p, err := LookPath("remmina"); err == nil {
+			return start(p, "-c", "rdp://"+addr)
+		}
+		return start("xdg-open", "rdp://"+addr)
+	}
+}
+
+// OpenVNC opens a VNC client (Screen Sharing on macOS) for host:port.
+func OpenVNC(host string, port int) error {
+	u := fmt.Sprintf("vnc://%s:%d", host, port)
+	if runtime.GOOS == "linux" {
+		if p, err := LookPath("remmina"); err == nil {
+			return start(p, "-c", u)
+		}
+	}
+	return OpenURL(u)
+}
