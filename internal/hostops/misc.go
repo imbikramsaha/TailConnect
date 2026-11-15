@@ -278,9 +278,23 @@ func SafeName(name string) (string, error) {
 		}
 		return r
 	}, name)
+	name = strings.Map(func(r rune) rune {
+		if (r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069') {
+			return -1 // bidi overrides disguise extensions ("txt.exe")
+		}
+		return r
+	}, name)
 	name = strings.TrimLeft(strings.TrimSpace(name), ".")
+	name = strings.TrimRight(name, ". ") // Windows strips these silently
 	if name == "" || name == "/" {
 		return "", errors.New("invalid file name")
+	}
+	// Windows reserved device names (CON, NUL, COM1…), with any extension.
+	base := strings.ToUpper(strings.SplitN(name, ".", 2)[0])
+	switch base {
+	case "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9":
+		name = "_" + name
 	}
 	if len(name) > 200 {
 		ext := filepath.Ext(name)
@@ -295,7 +309,7 @@ func Receive(dir, name string, r io.Reader) (string, int64, error) {
 	if err != nil {
 		return "", 0, err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", 0, err
 	}
 	tmp, err := os.CreateTemp(dir, ".incoming-*")
@@ -323,6 +337,7 @@ func Receive(dir, name string, r io.Reader) (string, int64, error) {
 		}
 		if err := os.Link(tmp.Name(), dst); err == nil {
 			os.Remove(tmp.Name())
+			quarantine(dst)
 			return dst, n, nil
 		} else if !os.IsExist(err) {
 			// Filesystems without hard links: fall back to rename.
@@ -330,9 +345,20 @@ func Receive(dir, name string, r io.Reader) (string, int64, error) {
 				os.Remove(tmp.Name())
 				return "", 0, err
 			}
+			quarantine(dst)
 			return dst, n, nil
 		}
 	}
 	os.Remove(tmp.Name())
 	return "", 0, errors.New("too many files with that name")
+}
+
+// quarantine marks a received file as downloaded from elsewhere so macOS
+// Gatekeeper checks it before it can run (like files from a browser).
+func quarantine(path string) {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	val := fmt.Sprintf("0081;%08x;TailConnect;", time.Now().Unix())
+	_ = exec.Command("/usr/bin/xattr", "-w", "com.apple.quarantine", val, path).Run()
 }

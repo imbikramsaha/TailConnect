@@ -12,8 +12,8 @@ const Port = 4747
 // SSHPort is the tailnet TCP port of TailConnect's built-in SSH server.
 const SSHPort = 4748
 
-// ProtocolVersion is bumped on incompatible API changes.
-const ProtocolVersion = 1
+// ProtocolVersion is bumped on incompatible API changes. v2: signed requests.
+const ProtocolVersion = 2
 
 // AppID identifies TailConnect in Hello responses.
 const AppID = "tailconnect"
@@ -45,6 +45,9 @@ type Hello struct {
 	// MACs and LANs let paired devices wake this one (Wake-on-LAN).
 	MACs []string `json:"macs,omitempty"`
 	LANs []string `json:"lans,omitempty"`
+	// HostKey is the built-in SSH server's host key (authorized_keys
+	// format), so peers pin it instead of trusting it on first use.
+	HostKey string `json:"hostKey,omitempty"`
 }
 
 // PairRequest asks a device to trust the caller.

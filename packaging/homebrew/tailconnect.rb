@@ -24,7 +24,14 @@ cask "tailconnect" do
   app "TailConnect.app"
   binary "#{appdir}/TailConnect.app/Contents/MacOS/tailconnect"
 
-  uninstall quit: "io.github.imbikramsaha.tailconnect"
+  # Remove paired devices' keys from ~/.ssh/authorized_keys and the
+  # ~/.ssh/config Include before the app goes away.
+  uninstall quit:   "io.github.imbikramsaha.tailconnect",
+            script: {
+              executable:   "#{appdir}/TailConnect.app/Contents/MacOS/tailconnect",
+              args:         ["cleanup"],
+              must_succeed: false,
+            }
 
   zap trash: [
     "~/Library/Application Support/TailConnect",

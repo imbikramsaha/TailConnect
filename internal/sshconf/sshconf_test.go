@@ -56,3 +56,28 @@ func TestRenderProxy(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderRejectsInjection(t *testing.T) {
+	o := Options{Exe: "/bin/tailconnect", KeyPath: "/k", KnownHosts: "/kh"}
+	evil := []Entry{
+		{Alias: "tc-a", User: "bob\nHost *\n  ProxyCommand touch /tmp/pwned", Port: 22, DeviceID: "p-1", Proxy: true},
+		{Alias: "tc-b", HostName: "x\nProxyCommand evil", Port: 22},
+		{Alias: "tc-c\nHost *", Port: 22},
+		{Alias: "tc-d", User: "%d", Port: 22},
+		{Alias: "tc-e", User: "-oProxyCommand=evil", Port: 22},
+		{Alias: "tc-f", DeviceID: "p-1 ; evil", Proxy: true, Port: 22},
+	}
+	out := Render(evil, o)
+	for _, bad := range []string{"pwned", "evil", "Host *", "%d"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("injected %q into config:\n%s", bad, out)
+		}
+	}
+	ok := Render([]Entry{{Alias: "tc-win", User: "John Smith", Port: 22, HostName: "10.0.0.5"}}, o)
+	if !strings.Contains(ok, `User "John Smith"`) {
+		t.Errorf("user with space not quoted:\n%s", ok)
+	}
+	if out := Render(nil, Options{Exe: "/a\"b", KeyPath: "/k", KnownHosts: "/kh"}); strings.Contains(out, "Host ") {
+		t.Errorf("rendered with unsafe exe path:\n%s", out)
+	}
+}

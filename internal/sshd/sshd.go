@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -34,11 +35,18 @@ type Server struct {
 	Logf    func(format string, args ...any)
 	// OnSession is called when a session starts (for the access log).
 	OnSession func(peer, kind string)
+	// Admit, if set, is checked when a connection arrives (before the SSH
+	// handshake) so unpaired devices can't even reach the handshake.
+	Admit func(ctx context.Context, remoteAddr string) bool
 
-	mu    sync.Mutex
-	lns   []net.Listener
-	conns map[*ssh.ServerConn]struct{}
+	mu     sync.Mutex
+	closed bool
+	lns    []net.Listener
+	raw    map[net.Conn]struct{} // every accepted connection, incl. handshakes
 }
+
+// maxChannels caps concurrent sessions/forwards per connection.
+const maxChannels = 32
 
 func (s *Server) logf(format string, args ...any) {
 	if s.Logf != nil {
@@ -49,9 +57,14 @@ func (s *Server) logf(format string, args ...any) {
 // Serve accepts connections on ln until it is closed.
 func (s *Server) Serve(ln net.Listener) error {
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		ln.Close()
+		return nil
+	}
 	s.lns = append(s.lns, ln)
-	if s.conns == nil {
-		s.conns = map[*ssh.ServerConn]struct{}{}
+	if s.raw == nil {
+		s.raw = map[net.Conn]struct{}{}
 	}
 	s.mu.Unlock()
 	for {
@@ -66,17 +79,35 @@ func (s *Server) Serve(ln net.Listener) error {
 	}
 }
 
-// Close stops listening and drops all connections.
+// Close stops listening and drops all connections, including ones still in
+// their handshake (which could otherwise finish after a revocation).
 func (s *Server) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.closed = true
 	for _, ln := range s.lns {
 		ln.Close()
 	}
 	s.lns = nil
-	for c := range s.conns {
+	for c := range s.raw {
 		c.Close()
 	}
+}
+
+func (s *Server) register(c net.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.raw[c] = struct{}{}
+	return true
+}
+
+func (s *Server) unregister(c net.Conn) {
+	s.mu.Lock()
+	delete(s.raw, c)
+	s.mu.Unlock()
 }
 
 func (s *Server) config() *ssh.ServerConfig {
@@ -89,7 +120,9 @@ func (s *Server) config() *ssh.ServerConfig {
 			if err != nil {
 				return nil, err
 			}
-			return &ssh.Permissions{Extensions: map[string]string{"peer": name}}, nil
+			return &ssh.Permissions{Extensions: map[string]string{
+				"peer": name, "key": string(key.Marshal()),
+			}}, nil
 		},
 		MaxAuthTries: 6,
 	}
@@ -98,23 +131,49 @@ func (s *Server) config() *ssh.ServerConfig {
 }
 
 func (s *Server) handleConn(nc net.Conn) {
-	_ = nc.SetDeadline(time.Now().Add(30 * time.Second))
-	sc, chans, reqs, err := ssh.NewServerConn(nc, s.config())
-	if err != nil {
+	if !s.register(nc) {
 		nc.Close()
 		return
 	}
-	_ = nc.SetDeadline(time.Time{})
-	s.mu.Lock()
-	s.conns[sc] = struct{}{}
-	s.mu.Unlock()
 	defer func() {
-		s.mu.Lock()
-		delete(s.conns, sc)
-		s.mu.Unlock()
-		sc.Close()
+		s.unregister(nc)
+		nc.Close()
 	}()
+	remote := nc.RemoteAddr().String()
+	if s.Admit != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ok := s.Admit(ctx, remote)
+		cancel()
+		if !ok {
+			return
+		}
+	}
+	_ = nc.SetDeadline(time.Now().Add(30 * time.Second))
+	sc, chans, reqs, err := ssh.NewServerConn(nc, s.config())
+	if err != nil {
+		return
+	}
+	_ = nc.SetDeadline(time.Time{})
+	defer sc.Close()
 	peer := sc.Permissions.Extensions["peer"]
+	key, kerr := ssh.ParsePublicKey([]byte(sc.Permissions.Extensions["key"]))
+	// stillTrusted re-checks access (the auth result may have been cached
+	// across a revocation, and access can change while connected).
+	stillTrusted := func() bool {
+		s.mu.Lock()
+		closed := s.closed
+		s.mu.Unlock()
+		if closed || kerr != nil {
+			return false
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := s.Auth(ctx, remote, key)
+		return err == nil
+	}
+	if !stillTrusted() {
+		return
+	}
 	s.logf("sshd: %s connected (user %q)", peer, sc.User())
 
 	go func() {
@@ -125,17 +184,33 @@ func (s *Server) handleConn(nc net.Conn) {
 			}
 		}
 	}()
-	remote := nc.RemoteAddr().String()
+	var active atomic.Int32
 	for nch := range chans {
+		if !stillTrusted() {
+			_ = nch.Reject(ssh.Prohibited, "access revoked")
+			return
+		}
+		if active.Load() >= maxChannels {
+			_ = nch.Reject(ssh.ResourceShortage, "too many channels")
+			continue
+		}
 		switch nch.ChannelType() {
 		case "session":
 			ch, creqs, err := nch.Accept()
 			if err != nil {
 				continue
 			}
-			go s.session(peer, remote, ch, creqs)
+			active.Add(1)
+			go func() {
+				defer active.Add(-1)
+				s.session(peer, remote, ch, creqs)
+			}()
 		case "direct-tcpip":
-			go s.directTCPIP(peer, nch)
+			active.Add(1)
+			go func() {
+				defer active.Add(-1)
+				s.directTCPIP(peer, nch)
+			}()
 		default:
 			_ = nch.Reject(ssh.UnknownChannelType, "unsupported channel type")
 		}

@@ -75,7 +75,7 @@ func LookPath(name string) (string, error) {
 	}
 	for _, d := range extraDirs() {
 		p := filepath.Join(d, name)
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 && trustedFile(p) {
 			return p, nil
 		}
 	}
@@ -83,18 +83,21 @@ func LookPath(name string) (string, error) {
 }
 
 func (b Builtin) find() (string, error) {
+	// On macOS prefer the app bundles in /Applications over command shims in
+	// Homebrew folders (which may belong to another user on a shared Mac).
+	if runtime.GOOS == "darwin" {
+		for _, p := range b.mac {
+			if _, err := os.Stat(p); err == nil {
+				return p, nil
+			}
+		}
+	}
 	for _, n := range b.bins {
 		if p, err := LookPath(n); err == nil {
 			return p, nil
 		}
 	}
 	switch runtime.GOOS {
-	case "darwin":
-		for _, p := range b.mac {
-			if _, err := os.Stat(p); err == nil {
-				return p, nil
-			}
-		}
 	case "windows":
 		for _, root := range []string{os.Getenv("LOCALAPPDATA"), os.Getenv("ProgramFiles")} {
 			if root == "" {
@@ -315,4 +318,20 @@ func OpenVNC(host string, port int) error {
 		}
 	}
 	return OpenURL(u)
+}
+
+// trustedFile reports whether an executable found outside PATH is safe to
+// run: not writable by others, in a directory not writable by others, and
+// owned by root or the current user (Unix; always true elsewhere).
+func trustedFile(p string) bool {
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	for _, q := range []string{p, filepath.Dir(p)} {
+		fi, err := os.Stat(q)
+		if err != nil || fi.Mode().Perm()&0o022 != 0 || !ownedBySelfOrRoot(fi) {
+			return false
+		}
+	}
+	return true
 }

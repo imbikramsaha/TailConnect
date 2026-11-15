@@ -47,13 +47,16 @@ Name: "{autoprograms}\TailConnect"; Filename: "{app}\TailConnectApp.exe"
 
 [Registry]
 ; Same value the app's own "Start at login" setting writes.
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "TailConnect"; ValueData: """{app}\TailConnectApp.exe"" --background"; Tasks: startup; Flags: uninsdeletevalue
+; Not re-applied by silent updates (the user may have turned it off in the app).
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "TailConnect"; ValueData: """{app}\TailConnectApp.exe"" --background"; Tasks: startup; Flags: uninsdeletevalue; Check: not WizardSilent
 
 [Run]
 Filename: "{app}\TailConnectApp.exe"; Parameters: "--background"; Description: "Open TailConnect"; Flags: nowait postinstall
 
 [UninstallRun]
 Filename: "{app}\tailconnect.exe"; Parameters: "quit"; Flags: runhidden; RunOnceId: "QuitTailConnect"
+; Remove paired devices' keys from authorized_keys and the ~/.ssh/config Include.
+Filename: "{app}\tailconnect.exe"; Parameters: "cleanup"; Flags: runhidden; RunOnceId: "CleanupTailConnect"
 
 [Code]
 const EnvKey = 'Environment';
@@ -80,18 +83,31 @@ begin
   end;
 end;
 
+// Remove exactly our directory (with or without a trailing backslash) from
+// the user's Path, leaving every other entry untouched.
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
-var Paths, Dir: string; P: Integer;
+var Paths, Dir, Entry, Kept: string; P: Integer; Changed: Boolean;
 begin
-  if CurUninstallStep = usPostUninstall then begin
-    Dir := ExpandConstant('{app}');
-    if RegQueryStringValue(HKCU, EnvKey, 'Path', Paths) then begin
-      P := Pos(';' + Uppercase(Dir), ';' + Uppercase(Paths));
-      if P > 0 then begin
-        Delete(Paths, P - 1, Length(Dir) + 1);
-        if Copy(Paths, 1, 1) = ';' then Delete(Paths, 1, 1);
-        RegWriteExpandStringValue(HKCU, EnvKey, 'Path', Paths);
-      end;
+  if CurUninstallStep <> usPostUninstall then exit;
+  Dir := Uppercase(RemoveBackslashUnlessRoot(ExpandConstant('{app}')));
+  if not RegQueryStringValue(HKCU, EnvKey, 'Path', Paths) then exit;
+  Kept := '';
+  Changed := False;
+  while Paths <> '' do begin
+    P := Pos(';', Paths);
+    if P = 0 then begin
+      Entry := Paths;
+      Paths := '';
+    end else begin
+      Entry := Copy(Paths, 1, P - 1);
+      Delete(Paths, 1, P);
+    end;
+    if Uppercase(RemoveBackslashUnlessRoot(Trim(Entry))) = Dir then
+      Changed := True
+    else if Entry <> '' then begin
+      if Kept <> '' then Kept := Kept + ';';
+      Kept := Kept + Entry;
     end;
   end;
+  if Changed then RegWriteExpandStringValue(HKCU, EnvKey, 'Path', Kept);
 end;

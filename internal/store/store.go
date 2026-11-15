@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -152,7 +153,7 @@ func (t TrustedPeer) Level() string {
 	if ValidAccess(t.Access) {
 		return t.Access
 	}
-	return AccessFull
+	return AccessStats // unknown values fail closed (old state is migrated to "full")
 }
 
 // Pending is a pairing request awaiting the user's decision (persisted so a
@@ -185,7 +186,7 @@ type State struct {
 }
 
 // stateVersion is the current schema version.
-const stateVersion = 2
+const stateVersion = 3
 
 // DefaultApps are the built-in launchers enabled on first run.
 var DefaultApps = []string{"terminal", "vscode", "cursor"}
@@ -205,11 +206,16 @@ func defaults() State {
 			CheckUpdates:        true,
 			Alerts:              DefaultAlerts(),
 		},
-		Apps: []App{
-			{ID: "jupyter", Name: "JupyterLab", Port: 8888, OpenBrowser: true,
-				Script: "jupyter lab --no-browser --port=8888 --ServerApp.token='' --ServerApp.password=''"},
-		},
+		Apps: []App{defaultJupyter()},
 	}
+}
+
+// defaultJupyter runs JupyterLab with a fresh random token per start
+// ($TC_APP_TOKEN), opened via {token} in the URL path — never without auth,
+// since anyone with access to the device's localhost could use it.
+func defaultJupyter() App {
+	return App{ID: "jupyter", Name: "JupyterLab", Port: 8888, OpenBrowser: true, Path: "lab?token={token}",
+		Script: `jupyter lab --no-browser --port=8888 --IdentityProvider.token="$TC_APP_TOKEN"`}
 }
 
 // DefaultAlerts are the default resource alert thresholds.
@@ -226,6 +232,21 @@ func migrate(st *State) {
 		st.Settings.CheckUpdates = true
 		st.Settings.Alerts = DefaultAlerts()
 		st.Version = 2
+	}
+	if st.Version < 3 {
+		// v1/v2 stored "" for full access.
+		for i := range st.Trusted {
+			if st.Trusted[i].Access == "" {
+				st.Trusted[i].Access = AccessFull
+			}
+		}
+		// The old default JupyterLab app ran without a token.
+		for i := range st.Apps {
+			if st.Apps[i].ID == "jupyter" && strings.Contains(st.Apps[i].Script, "--ServerApp.token=''") {
+				st.Apps[i] = defaultJupyter()
+			}
+		}
+		st.Version = 3
 	}
 	if !ValidAccess(st.Settings.OwnDeviceAccess) {
 		st.Settings.OwnDeviceAccess = AccessFull

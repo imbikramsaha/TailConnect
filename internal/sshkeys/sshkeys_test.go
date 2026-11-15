@@ -28,7 +28,8 @@ func TestAuthorizeRevoke(t *testing.T) {
 		}
 	}
 	b, _ := os.ReadFile(ak)
-	if strings.Count(string(b), pub) != 1 || !strings.Contains(string(b), "user@host") {
+	if strings.Count(string(b), pub) != 1 || !strings.Contains(string(b), "user@host") ||
+		!strings.Contains(string(b), `from="127.0.0.1,::1"`) {
 		t.Fatalf("authorized_keys:\n%s", b)
 	}
 	if err := Revoke(ak, "nodeA"); err != nil {

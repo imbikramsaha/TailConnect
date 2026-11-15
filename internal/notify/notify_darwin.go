@@ -19,6 +19,7 @@ import (
 func tcNotifyClicked(route *C.char) { clicked(C.GoString(route)) }
 
 func send(title, body, route string) error {
+	title, body = clean(title), clean(body)
 	if C.tcNotifyAvailable() == 1 {
 		ct, cb, cr := C.CString(title), C.CString(body), C.CString(route)
 		defer C.free(unsafe.Pointer(ct))

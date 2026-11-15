@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/imbikramsaha/tailconnect/internal/netx"
 	"github.com/imbikramsaha/tailconnect/internal/sysinfo"
 )
@@ -21,21 +23,23 @@ import (
 // DialFunc dials over the tailnet.
 type DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 
-// Client talks to other devices' agent APIs.
+// Client talks to other devices' agent APIs. Every request is signed with
+// signer (this device's TailConnect key).
 type Client struct {
-	dial DialFunc
-	hc   *http.Client
+	dial   DialFunc
+	hc     *http.Client
+	signer ssh.Signer
 }
 
-// NewClient returns a client dialling through dial.
-func NewClient(dial DialFunc) *Client {
+// NewClient returns a client dialling through dial and signing with signer.
+func NewClient(dial DialFunc, signer ssh.Signer) *Client {
 	tr := &http.Transport{
 		DialContext:           dial,
 		MaxIdleConnsPerHost:   2,
 		IdleConnTimeout:       60 * time.Second,
 		ResponseHeaderTimeout: 20 * time.Second,
 	}
-	return &Client{dial: dial, hc: &http.Client{Transport: tr}}
+	return &Client{dial: dial, hc: &http.Client{Transport: tr}, signer: signer}
 }
 
 func base(ip string) string {
@@ -57,6 +61,9 @@ func (c *Client) do(ctx context.Context, method, ip, path string, body, out any)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if err := signRequest(req, c.signer); err != nil {
+		return err
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -130,6 +137,10 @@ func (c *Client) Tunnel(ctx context.Context, ip string, port int) (net.Conn, err
 	req, _ := http.NewRequest(http.MethodGet, base(ip)+"/v1/tunnel?port="+strconv.Itoa(port), nil)
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Upgrade", tunnelProto)
+	if err := signRequest(req, c.signer); err != nil {
+		conn.Close()
+		return nil, err
+	}
 	if err := req.Write(conn); err != nil {
 		conn.Close()
 		return nil, err
@@ -192,6 +203,9 @@ func (c *Client) Speed(ctx context.Context, ip string, n int64) (bytesPerSec flo
 	if err != nil {
 		return 0, err
 	}
+	if err := signRequest(req, c.signer); err != nil {
+		return 0, err
+	}
 	start := time.Now()
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -217,6 +231,9 @@ func (c *Client) SendFile(ctx context.Context, ip, name string, size int64, r io
 	}
 	req.ContentLength = size
 	req.Header.Set("Content-Type", "application/octet-stream")
+	if err := signRequest(req, c.signer); err != nil {
+		return nil, err
+	}
 	hc := &http.Client{Transport: c.hc.Transport} // no overall timeout for big files
 	resp, err := hc.Do(req)
 	if err != nil {

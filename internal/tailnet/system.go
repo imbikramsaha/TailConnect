@@ -3,6 +3,7 @@ package tailnet
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"strconv"
@@ -85,6 +86,14 @@ func (n *Node) listenSystem(network, addr string) (net.Listener, error) {
 	for _, h := range hosts {
 		ln, err := net.Listen(network, net.JoinHostPort(h.String(), portStr))
 		if err != nil {
+			// tailscaled forwards IPv4 traffic to 127.0.0.1: if someone else
+			// holds that port they'd receive our peers' connections.
+			if h.Is4() {
+				for _, l := range lns {
+					l.Close()
+				}
+				return nil, fmt.Errorf("port %s on %s is taken by another program; TailConnect can't receive connections", portStr, h)
+			}
 			continue // e.g. no IPv6 loopback
 		}
 		lns = append(lns, ln)

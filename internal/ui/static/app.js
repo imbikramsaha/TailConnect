@@ -1,19 +1,48 @@
 "use strict";
 /* TailConnect UI — a dependency-free single page talking to the local control API. */
 
+// ---------- session ----------
+// The sign-in redirect puts a session in the URL fragment (never sent to a
+// server). Keep it in per-tab storage — isolated by port, unlike cookies —
+// and send it as a header. No cookie exists for other local sites to steal.
+const SESSION = (() => {
+  const m = location.hash.match(/^#s=([0-9a-f]{64})(?:&r=([^&]*))?/);
+  if (m) {
+    try { sessionStorage.setItem("tc_session", m[1]); } catch {}
+    const r = m[2] ? decodeURIComponent(m[2]) : "/";
+    history.replaceState(null, "", "#" + (r.startsWith("/") ? r : "/"));
+    return m[1];
+  }
+  try { return sessionStorage.getItem("tc_session") || ""; } catch { return ""; }
+})();
+function authHeaders(extra) {
+  return Object.assign({ "X-TailConnect": "1", "Authorization": "Bearer " + SESSION }, extra || {});
+}
+function signedOut() {
+  try { sessionStorage.removeItem("tc_session"); } catch {}
+  document.getElementById("app").innerHTML = `<div class="center"><div class="hero"><img src="/icon.png" alt="">
+    <h1>Not signed in</h1><p>Open TailConnect from the menu bar or tray icon, or run <code>tailconnect open</code>.</p></div></div>`;
+}
+
 // ---------- api ----------
 const api = {
   async req(method, path, body) {
-    const opt = { method, headers: { "X-TailConnect": "1" }, credentials: "same-origin" };
+    if (!SESSION) { signedOut(); throw new Error("not signed in"); }
+    const opt = { method, headers: authHeaders(), credentials: "omit", cache: "no-store" };
     if (body !== undefined) {
       opt.headers["Content-Type"] = "application/json";
       opt.body = JSON.stringify(body);
     }
     const r = await fetch(path, opt);
+    if (r.status === 401) { signedOut(); throw new Error("not signed in"); }
     const text = await r.text();
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch { data = null; }
-    if (!r.ok) throw new Error((data && data.error) || text.trim() || r.statusText);
+    if (!r.ok) {
+      const err = new Error((data && data.error) || text.trim() || r.statusText);
+      err.data = data;
+      throw err;
+    }
     return data;
   },
   get(p) { return this.req("GET", p); },
@@ -181,7 +210,7 @@ function shell(content, settingsMode) {
   </div>`;
 }
 
-const ACCESS = [["full", "Full access", "Terminal, editors, files, ports and monitor"], ["ports", "Ports & monitor", "Forwarded ports, screen sharing and the resource monitor — no shell"], ["stats", "Monitor only", "Only the resource monitor"]];
+const ACCESS = [["full", "Full access", "Terminal, editors, files, ports and monitor"], ["ports", "Ports & monitor", "Forwarded ports, screen sharing and the resource monitor — no shell, but any service on this computer's localhost becomes reachable, so limit the ports if some have no password"], ["stats", "Monitor only", "Only the resource monitor"]];
 function accessLabel(a) { const x = ACCESS.find(v => v[0] === a); return x ? x[1] : "No access"; }
 function accessSelect(attrs, cur) {
   return `<select ${attrs}>${ACCESS.map(([v, l]) => `<option value="${v}" ${v === cur ? "selected" : ""}>${l}</option>`).join("")}</select>`;
@@ -442,7 +471,7 @@ async function sendFiles(id, files) {
     if (el()) el().textContent = `Sending ${f.name} (${bytes(f.size)})…`;
     try {
       const r = await fetch(`/api/devices/${enc(id)}/files?name=${enc(f.name)}`, {
-        method: "POST", body: f, credentials: "same-origin", headers: { "X-TailConnect": "1", "Content-Type": "application/octet-stream" },
+        method: "POST", body: f, credentials: "omit", headers: authHeaders({ "Content-Type": "application/octet-stream" }),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
       ok++;
@@ -475,7 +504,7 @@ function customApps(d) {
         ? `Running · <span class="mono">localhost:${r.localPort}</span>${r.localPort !== r.remotePort ? ` (remote ${r.remotePort})` : ""}`
         : h(r.status);
       if (r.error) status += ` · <span style="color:var(--warn)">${h(r.error)}</span>`;
-      btns = `<button class="btn sm" data-act="ext" data-url="${h(r.url)}">${icon("ext")}Open</button>
+      btns = `${r.password ? `<button class="btn sm" data-act="copy" data-text="${h(r.password)}" title="This start's password ($TC_APP_TOKEN)">${icon("copy")}Copy password</button>` : ""}<button class="btn sm" data-act="ext" data-url="${h(r.url)}">${icon("ext")}Open</button>
               <button class="btn sm" data-act="app-stop" data-id="${h(d.id)}" data-app="${h(a.id)}">${icon("stop")}Stop</button>`;
     } else {
       btns = `<button class="btn sm primary" data-act="app-start" data-id="${h(d.id)}" data-app="${h(a.id)}" ${pending || !d.online ? "disabled" : ""}>${pending ? '<span class="spinner sm"></span>' : icon("play")}Start</button>`;
@@ -787,7 +816,7 @@ let dialogSubmit = null;
 
 function openDialog(title, sub, bodyHTML, okLabel, onSubmit, opts = {}) {
   root.innerHTML = `<div class="overlay"><form class="dialog" novalidate>
-    <header><h3>${h(title)}</h3>${sub ? `<p>${sub}</p>` : ""}</header>
+    <header><h3>${h(title)}</h3>${sub ? `<p>${h(sub)}</p>` : ""}</header>
     <div class="body">${bodyHTML}</div>
     <footer><span class="err"></span>${opts.noCancel ? "" : `<button type="button" class="btn" data-dlg="cancel">Cancel</button>`}
       <button type="submit" class="btn ${opts.danger ? "danger" : "primary"}">${h(okLabel)}</button></footer>
@@ -841,25 +870,41 @@ function addDeviceDialog(prefHost, prefName) {
     <div class="f"><span>Connect</span><div class="seg" data-name="via" data-value="${prefHost ? "tailnet" : ""}">
       <button type="button" data-v="" class="${prefHost ? "" : "sel"}">Auto</button>
       <button type="button" data-v="direct">Directly</button>
-      <button type="button" data-v="tailnet" class="${prefHost ? "sel" : ""}">Through Tailscale</button></div></div>`,
+      <button type="button" data-v="tailnet" class="${prefHost ? "sel" : ""}">Through Tailscale</button></div></div>
+    <input type="hidden" name="hostKey" value="">
+    <div class="alert hidden" data-hostkey-box></div>`,
     "Add device", async form => {
       const f = Object.fromEntries(new FormData(form));
-      const dev = await api.post("/api/devices/ssh", {
-        name: f.name, host: f.host, port: parseInt(f.port, 10) || 22, user: f.user, password: f.password,
-        via: form.querySelector(".seg").dataset.value || "",
-      });
+      let dev;
+      try {
+        dev = await api.post("/api/devices/ssh", {
+          name: f.name, host: f.host, port: parseInt(f.port, 10) || 22, user: f.user, password: f.password,
+          via: form.querySelector(".seg").dataset.value || "", hostKey: f.hostKey,
+        });
+      } catch (e) {
+        if (e.data && e.data.hostKey) {
+          // First contact: show the server's fingerprint before the password is sent.
+          form.elements.hostKey.value = e.data.hostKey;
+          const box = form.querySelector("[data-hostkey-box]");
+          box.classList.remove("hidden");
+          box.innerHTML = `<b>Check this is the right computer.</b> Its SSH fingerprint is<br><span class="mono">${h(e.data.hostKey)}</span><br>
+            <span class="small muted">On that computer, <span class="mono">ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</span> shows it. Click Add device again to confirm.</span>`;
+          throw new Error("Confirm the fingerprint, then click Add device again");
+        }
+        throw e;
+      }
       toast(`Added ${dev.name} — connect with “ssh ${dev.alias}”`);
       location.hash = "#/device/" + enc(dev.id);
     });
 }
 
 const TEMPLATES = [
-  { name: "JupyterLab", port: 8888, openBrowser: true, script: "jupyter lab --no-browser --port=8888 --ServerApp.token='' --ServerApp.password=''" },
+  { name: "JupyterLab", port: 8888, openBrowser: true, path: "lab?token={token}", script: 'jupyter lab --no-browser --port=8888 --IdentityProvider.token="$TC_APP_TOKEN"' },
   { name: "Ollama API", port: 11434, openBrowser: false, script: "pgrep -x ollama >/dev/null || ollama serve" },
   { name: "Open WebUI", port: 3000, openBrowser: true, script: "docker start open-webui 2>/dev/null || docker run -d --name open-webui -p 127.0.0.1:3000:8080 -v open-webui:/app/backend/data --add-host=host.docker.internal:host-gateway ghcr.io/open-webui/open-webui:main" },
   { name: "ComfyUI", port: 8188, openBrowser: true, script: "cd ~/ComfyUI && python main.py --listen 127.0.0.1 --port 8188" },
   { name: "Stable Diffusion WebUI", port: 7860, openBrowser: true, script: "cd ~/stable-diffusion-webui && ./webui.sh" },
-  { name: "code-server (VS Code in browser)", port: 8080, openBrowser: true, script: "code-server --bind-addr 127.0.0.1:8080 --auth none" },
+  { name: "code-server (VS Code in browser)", port: 8080, openBrowser: true, script: 'PASSWORD="$TC_APP_TOKEN" code-server --bind-addr 127.0.0.1:8080 --auth password' },
   { name: "TensorBoard", port: 6006, openBrowser: true, script: "tensorboard --logdir ~/runs --port 6006" },
   { name: "Streamlit app", port: 8501, openBrowser: true, script: "streamlit run app.py --server.port 8501 --server.headless true" },
   { name: "vLLM server", port: 8000, openBrowser: false, path: "docs", script: "vllm serve Qwen/Qwen2.5-7B-Instruct --port 8000" },
@@ -877,7 +922,7 @@ function appDialog(appID, preset) {
       <label class="f"><span>Port</span><input type="number" name="port" required min="1" max="65535" placeholder="8888" value="${h(a.port)}"></label>
     </div>
     <label class="f"><span>Launch script (bash, optional)</span><textarea name="script" rows="4" spellcheck="false" placeholder="jupyter lab --no-browser --port=8888">${h(a.script || "")}</textarea>
-      <small>Runs from your home directory on the device. Leave empty to only forward a port that's already in use.</small></label>
+      <small>Runs from your home directory on the device. <span class="mono">$TC_APP_TOKEN</span> is a fresh random secret each start — use it as the service's token or password (put <span class="mono">{token}</span> in the path below to pass it in the URL). Leave empty to only forward a port that's already in use.</small></label>
     <label class="check"><input type="checkbox" name="openBrowser" ${a.openBrowser ? "checked" : ""}> Open in browser at <span class="mono">http://localhost:PORT/</span><input type="text" name="path" placeholder="path" style="height:28px;width:120px" value="${h(a.path || "")}"></label>
     <label class="check"><input type="checkbox" name="inTerminal" ${a.inTerminal ? "checked" : ""}> Run the script in a terminal window (stays open if it fails)</label>
     ${mine.length ? `<div class="f"><span>Show on</span><div class="seg" data-name="scope" data-value="${scoped.size ? "some" : "all"}">
@@ -1140,7 +1185,7 @@ async function refresh() {
       S = await api.get("/api/state");
       render();
     } catch (e) {
-      if (/unauthorized/i.test(e.message)) location.reload();
+      // signed-out state is rendered by api.req
     } finally {
       refreshing = null;
     }
@@ -1148,14 +1193,31 @@ async function refresh() {
   return refreshing;
 }
 
-function connectEvents() {
-  const es = new EventSource("/api/events");
-  es.addEventListener("change", () => refresh());
-  es.onerror = () => {
-    es.close();
-    setTimeout(connectEvents, 2000);
-  };
+// Live updates over a streamed fetch (EventSource can't send headers).
+async function connectEvents() {
+  if (!SESSION) return;
+  try {
+    const r = await fetch("/api/events", { headers: authHeaders(), credentials: "omit", cache: "no-store" });
+    if (r.status === 401) return signedOut();
+    if (!r.ok || !r.body) throw new Error("events " + r.status);
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const msg = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        if (/^event: change/m.test(msg)) refresh();
+      }
+    }
+  } catch {}
+  setTimeout(connectEvents, 2000);
 }
 
-refresh().then(connectEvents);
+if (SESSION) refresh().then(connectEvents);
+else signedOut();
 setInterval(refresh, 15000); // relative times, safety net

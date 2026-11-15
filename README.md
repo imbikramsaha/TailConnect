@@ -94,14 +94,17 @@ tailconnect quit
 
 ## Security model
 
-- All device-to-device traffic travels inside Tailscale's WireGuard tunnels. Peers are identified by Tailscale (`WhoIs`), never by anything they claim.
-- Every request is checked against the caller's access level on this device. Port tunnels only reach `127.0.0.1`/`::1`, and only allowed ports; the SSH port needs full access.
-- Built-in SSH accepts a login only if the Tailscale identity *and* the key both match a device paired with full access. Lowering access or revoking closes its sessions; it is never reachable outside the tailnet.
-- For the system SSH server, a device's key is in `~/.ssh/authorized_keys` (tagged `tailconnect:<node-id>`) only while it has full access.
-- Pairing with other accounts shows a confirmation code on both screens. Process command lines are only shown to full-access devices. Stopping a process only works on your own user's processes.
-- The local control API listens on `127.0.0.1` only, requires a per-run random token, rejects foreign `Host` headers (DNS rebinding) and requires a custom header on every change (CSRF). Windows sign in with single-use, 2-minute tickets, so the token never appears in URLs or process arguments.
-- Updates are verified against the release's SHA-256 checksum and code signature (and, once Developer ID–signed, the same Apple Team ID) before installing.
-- TailConnect never stores SSH passwords and uploads nothing except to Tailscale and GitHub (update checks).
+See [SECURITY.md](SECURITY.md) for the full model and how to report a vulnerability. In short:
+
+- **Two factors for every device.** All traffic travels inside Tailscale's WireGuard tunnels, and callers are identified by Tailscale (`WhoIs`). On top of that, every request is signed with the device's TailConnect key, so another program or user account sharing a machine's Tailscale connection can't act as that device. A device never accepts itself as a caller.
+- **Access levels**, enforced on every request: *Full access* (terminal, editors, files), *Ports & monitor*, or *Monitor only*, optionally limited to specific ports. Revoking or lowering access closes open tunnels and SSH sessions immediately, and revoked devices aren't auto-paired again.
+- **Pairing.** Devices on your own Tailscale account pair automatically (you're notified each time). Others need your approval, with a 6-digit code shown on both screens. A paired device presenting a new key needs approval again.
+- **Built-in SSH** answers only devices with full access, verified by tailnet identity *and* paired key; its host key is pinned over the authenticated API. Keys installed for the system SSH server only work through TailConnect's tunnel (`from="127.0.0.1,::1"`).
+- **Nothing a peer sends is trusted:** names, usernames, paths and addresses are validated before reaching `~/.ssh/config`, command lines, notifications or the UI.
+- **Local control API:** loopback only, Host-header and same-origin checks, a per-run token for the CLI (which first verifies it's talking to the real app), and per-window sessions sent as headers — never cookies, which other local web servers could receive.
+- **Signed updates:** the app installs an update only if its checksums carry the maintainer's offline signature (and, for Developer-ID builds, the same Apple team). CI can build releases but cannot sign them.
+- **Uninstalling** removes TailConnect's keys from `~/.ssh/authorized_keys` and its `~/.ssh/config` entry (Windows uninstaller, Homebrew). On Linux run `tailconnect cleanup` before removing the package.
+- TailConnect never stores SSH passwords, and shows a new host's fingerprint for you to confirm before sending one.
 
 ## Files
 
@@ -129,7 +132,13 @@ Try the UI with two paired instances on an in-process tailnet:
 TC_DEMO=/tmp/tc-demo go test ./internal/ui -run TestDemo -timeout 60m   # login links in /tmp/tc-demo/urls.txt
 ```
 
-Set `SIGN_IDENTITY` (and `NOTARY_PROFILE`) to sign and notarize for distribution.
+Set `SIGN_IDENTITY` (and `NOTARY_PROFILE`, `TEAM_ID`) to sign and notarize for distribution.
+
+### Releasing
+
+1. Push a tag `vX.Y.Z`. CI tests everything, builds all packages and creates a **draft** release.
+2. Run `scripts/publish-release.sh vX.Y.Z` on the maintainer's machine. It verifies the draft's checksums, signs `SHA256SUMS` with the offline release key (`~/.tailconnect-release/release.key`) and publishes. Apps refuse updates without that signature.
+3. Copy the release's `tailconnect.rb` into the Homebrew tap.
 
 ## Architecture
 

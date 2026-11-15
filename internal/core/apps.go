@@ -30,7 +30,10 @@ type running struct {
 	StartedAt  time.Time `json:"startedAt"`
 	// AdHoc marks forwards started without a saved app (detected services).
 	AdHoc bool `json:"adHoc,omitempty"`
-	fwd   *forward.Forward
+	// Password is the per-start $TC_APP_TOKEN, shown when the service asks
+	// for it (scripts that use it without {token} in the URL).
+	Password string `json:"password,omitempty"`
+	fwd      *forward.Forward
 }
 
 // remote paths (relative to $HOME) used for custom app scripts and logs.
@@ -149,6 +152,10 @@ func (c *Core) StartApp(ctx context.Context, deviceID, appID string) (*running, 
 		return nil, err
 	}
 
+	// A fresh random token per start: scripts can use $TC_APP_TOKEN to
+	// protect the service, and the opened URL can carry it via {token}.
+	token := randomToken()
+	envPrefix := "TC_APP_TOKEN=" + token + " "
 	// Start the remote service unless something is already listening.
 	alreadyUp := c.remotePortOpen(ctx, dev, app.Port)
 	script := remoteDir + "/scripts/port-" + strconv.Itoa(app.Port) + ".sh"
@@ -163,7 +170,7 @@ func (c *Core) StartApp(ctx context.Context, deviceID, appID string) (*running, 
 		}
 		if !app.InTerminal {
 			logBase := `$HOME/` + remoteDir + `/logs/port-` + strconv.Itoa(app.Port)
-			run := fmt.Sprintf(`bash -c 'set -m; cd "$HOME"; nohup bash -l "$HOME/%s" > "%s.out" 2> "%s.err" < /dev/null & echo $!'`, script, logBase, logBase)
+			run := fmt.Sprintf(`bash -c 'set -m; cd "$HOME"; %snohup bash -l "$HOME/%s" > "%s.out" 2> "%s.err" < /dev/null & echo $!'`, envPrefix, script, logBase, logBase)
 			out, err := sshx.Run(ctx, cl, run, nil)
 			if err != nil {
 				return fail(fmt.Errorf("starting launch script: %w", err))
@@ -186,11 +193,14 @@ func (c *Core) StartApp(ctx context.Context, deviceID, appID string) (*running, 
 	c.mu.Lock()
 	r.fwd = f
 	r.LocalPort = f.Port
-	r.URL = "http://localhost:" + strconv.Itoa(f.Port) + "/" + app.Path
+	r.URL = "http://localhost:" + strconv.Itoa(f.Port) + "/" + strings.ReplaceAll(app.Path, "{token}", token)
+	if strings.Contains(app.Script, "TC_APP_TOKEN") && !strings.Contains(app.Path, "{token}") {
+		r.Password = token
+	}
 	c.mu.Unlock()
 
 	if app.InTerminal && !c.opts.Headless {
-		cmd := `bash -l "$HOME/` + script + `"; exec "${SHELL:-bash}" -l`
+		cmd := envPrefix + `bash -l "$HOME/` + script + `"; exec "${SHELL:-bash}" -l`
 		if strings.TrimSpace(app.Script) == "" {
 			cmd = ""
 		}

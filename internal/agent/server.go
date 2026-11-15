@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/imbikramsaha/tailconnect/internal/netx"
@@ -64,6 +65,10 @@ type Host interface {
 	Unpair(c Caller) error
 	// Event records/notifies an access event (file received, etc.).
 	Event(c Caller, kind, detail string)
+	// PeerKey is the public key a trusted device paired with ("" if none).
+	PeerKey(nodeID string) string
+	// PendingKey is the key of the caller's pairing request id ("" if none).
+	PendingKey(nodeID, id string) string
 }
 
 // Server serves the agent API.
@@ -73,6 +78,44 @@ type Server struct {
 	Ops  Ops
 	Logf func(format string, args ...any)
 	srv  *http.Server
+
+	nonces   nonceCache
+	speedSem chan struct{}
+
+	tmu     sync.Mutex
+	tunnels map[string]map[net.Conn]struct{} // by caller node ID
+}
+
+// MaxFileBytes caps a single received file.
+const MaxFileBytes = 20 << 30
+
+// CloseNode closes every open tunnel from a device (after its access was
+// revoked or lowered).
+func (s *Server) CloseNode(nodeID string) {
+	s.tmu.Lock()
+	conns := s.tunnels[nodeID]
+	delete(s.tunnels, nodeID)
+	s.tmu.Unlock()
+	for c := range conns {
+		c.Close()
+	}
+}
+
+func (s *Server) track(nodeID string, c net.Conn) func() {
+	s.tmu.Lock()
+	if s.tunnels == nil {
+		s.tunnels = map[string]map[net.Conn]struct{}{}
+	}
+	if s.tunnels[nodeID] == nil {
+		s.tunnels[nodeID] = map[net.Conn]struct{}{}
+	}
+	s.tunnels[nodeID][c] = struct{}{}
+	s.tmu.Unlock()
+	return func() {
+		s.tmu.Lock()
+		delete(s.tunnels[nodeID], c)
+		s.tmu.Unlock()
+	}
 }
 
 // Serve serves the API on ln until Close.
@@ -94,10 +137,13 @@ func (s *Server) Serve(ln net.Listener) error {
 	mux.HandleFunc("GET /v1/clipboard", s.need(AccessFull, s.getClipboard))
 	mux.HandleFunc("PUT /v1/clipboard", s.need(AccessFull, s.setClipboard))
 	mux.HandleFunc("GET /v1/tunnel", s.need(AccessPorts, s.tunnel))
+	s.speedSem = make(chan struct{}, 2)
 	s.srv = &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second, // file uploads extend their own deadline
 		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    32 << 10,
 	}
 	err := s.srv.Serve(ln)
 	if errors.Is(err, http.ErrServerClosed) {
@@ -153,6 +199,10 @@ func (s *Server) need(level string, h handler) http.HandlerFunc {
 			http.Error(w, "not paired with this device", http.StatusForbidden)
 			return
 		}
+		if err := s.nonces.verifyRequest(r, s.Host.PeerKey(c.NodeID)); err != nil {
+			http.Error(w, "unauthorized: "+err.Error(), http.StatusForbidden)
+			return
+		}
 		if rank(a) < rank(level) {
 			http.Error(w, "this device only allows "+describe(a)+" for you", http.StatusForbidden)
 			return
@@ -176,7 +226,12 @@ func (s *Server) hello(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, s.Host.Hello(c, s.Host.Access(c.NodeID)))
+	// Paired details only for a caller proving it holds the paired key.
+	access := s.Host.Access(c.NodeID)
+	if access != "" && s.nonces.verifyRequest(r, s.Host.PeerKey(c.NodeID)) != nil {
+		access = ""
+	}
+	writeJSON(w, http.StatusOK, s.Host.Hello(c, access))
 }
 
 func (s *Server) pair(w http.ResponseWriter, r *http.Request) {
@@ -185,8 +240,13 @@ func (s *Server) pair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req PairRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	// Proof of possession: the request must be signed by the offered key.
+	if err := s.nonces.verifyRequest(r, req.PublicKey); err != nil {
+		http.Error(w, "unauthorized: "+err.Error(), http.StatusForbidden)
 		return
 	}
 	resp := s.Host.HandlePair(r.Context(), c, req)
@@ -199,12 +259,25 @@ func (s *Server) pairStatus(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, s.Host.PairStatus(c, r.PathValue("id")))
+	id := r.PathValue("id")
+	key := s.Host.PendingKey(c.NodeID, id)
+	if key == "" {
+		key = s.Host.PeerKey(c.NodeID)
+	}
+	if err := s.nonces.verifyRequest(r, key); err != nil {
+		http.Error(w, "unauthorized: "+err.Error(), http.StatusForbidden)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.Host.PairStatus(c, id))
 }
 
 func (s *Server) unpair(w http.ResponseWriter, r *http.Request) {
 	c, ok := s.caller(w, r)
 	if !ok {
+		return
+	}
+	if err := s.nonces.verifyRequest(r, s.Host.PeerKey(c.NodeID)); err != nil {
+		http.Error(w, "unauthorized: "+err.Error(), http.StatusForbidden)
 		return
 	}
 	if err := s.Host.Unpair(c); err != nil {
@@ -309,6 +382,13 @@ func (s *Server) wake(w http.ResponseWriter, r *http.Request, c Caller, _ string
 const MaxSpeedBytes = 256 << 20
 
 func (s *Server) speed(w http.ResponseWriter, r *http.Request, _ Caller, _ string) {
+	select {
+	case s.speedSem <- struct{}{}:
+		defer func() { <-s.speedSem }()
+	default:
+		writeErr(w, http.StatusTooManyRequests, errors.New("a speed test is already running"))
+		return
+	}
 	n, err := strconv.ParseInt(r.URL.Query().Get("bytes"), 10, 64)
 	if err != nil || n <= 0 || n > MaxSpeedBytes {
 		writeErr(w, http.StatusBadRequest, errors.New("bytes must be 1.."+strconv.Itoa(MaxSpeedBytes)))
@@ -331,7 +411,14 @@ func (s *Server) speed(w http.ResponseWriter, r *http.Request, _ Caller, _ strin
 
 func (s *Server) receiveFile(w http.ResponseWriter, r *http.Request, c Caller, _ string) {
 	name := r.URL.Query().Get("name")
-	path, size, err := s.Ops.Receive(name, r.Body)
+	if r.ContentLength > MaxFileBytes {
+		writeErr(w, http.StatusRequestEntityTooLarge, errors.New("file is larger than 20 GB"))
+		return
+	}
+	// Large files take a while; allow an hour per upload instead of the
+	// server-wide read timeout.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(time.Hour))
+	path, size, err := s.Ops.Receive(name, http.MaxBytesReader(w, r.Body, MaxFileBytes))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
@@ -405,5 +492,9 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, c Caller, _ stri
 		return
 	}
 	s.logf("agent: tunnel %s -> localhost:%d", c.Name, port)
-	go netx.Pipe(&netx.BufConn{Conn: conn, R: brw.Reader}, up)
+	untrack := s.track(c.NodeID, conn)
+	go func() {
+		defer untrack()
+		netx.Pipe(&netx.BufConn{Conn: conn, R: brw.Reader}, up)
+	}()
 }

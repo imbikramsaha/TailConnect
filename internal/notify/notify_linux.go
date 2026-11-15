@@ -3,6 +3,7 @@ package notify
 import (
 	"errors"
 	"os/exec"
+	"strings"
 )
 
 func send(title, body, _ string) error {
@@ -10,5 +11,7 @@ func send(title, body, _ string) error {
 	if err != nil {
 		return errors.New("notify-send not found")
 	}
-	return exec.Command(bin, "--app-name=TailConnect", "--icon=network-workgroup", title, body).Run()
+	// notify-send bodies are markup: escape it so peers can't spoof content.
+	esc := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+	return exec.Command(bin, "--app-name=TailConnect", "--icon=tailconnect", "--", clean(title), esc.Replace(clean(body))).Run()
 }

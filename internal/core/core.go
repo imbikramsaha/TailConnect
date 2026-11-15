@@ -11,10 +11,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -94,10 +96,11 @@ type Core struct {
 	selfUserID int64
 	selfNodeID string
 
-	sshMu  sync.Mutex
-	sshSrv *sshd.Server
-	update UpdateInfo
-	alerts map[string]time.Time // alert key -> last fired
+	sshMu   sync.Mutex
+	sshSrv  *sshd.Server
+	hostKey string // built-in SSH host key (authorized_keys format)
+	update  UpdateInfo
+	alerts  map[string]time.Time // alert key -> last fired
 }
 
 // New prepares a Core; call Start to bring it up.
@@ -156,7 +159,7 @@ func New(opts Options) (*Core, error) {
 	}
 	c.home, _ = os.UserHomeDir()
 	c.node = tailnet.New(opts.Tailnet)
-	c.agentCli = agent.NewClient(c.node.Dial)
+	c.agentCli = agent.NewClient(c.node.Dial, id.Signer)
 	return c, nil
 }
 
@@ -251,6 +254,11 @@ func (c *Core) Login(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// The URL comes from the (possibly self-hosted) control server; only
+	// ever open web links, never file:, smb: or app-specific schemes.
+	if u != "" && !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "http://") {
+		return "", fmt.Errorf("the control server sent an unexpected sign-in link")
+	}
 	if u != "" && !c.opts.Headless {
 		if err := c.opts.OpenURL(u); err != nil {
 			c.logs.Printf("open login url: %v", err)
@@ -280,10 +288,7 @@ func (c *Core) UpdateSettings(fn func(*store.Settings)) error {
 	before := c.store.Get().Settings
 	if err := c.store.Update(func(st *store.State) error {
 		fn(&st.Settings)
-		if st.Settings.LocalSSHPort <= 0 || st.Settings.LocalSSHPort > 65535 {
-			st.Settings.LocalSSHPort = 22
-		}
-		return nil
+		return validateSettings(&st.Settings)
 	}); err != nil {
 		return err
 	}
@@ -325,6 +330,13 @@ func (c *Core) RestartRequired() bool {
 		mode = "app"
 	}
 	return st.ControlURL != c.opts.Tailnet.ControlURL || (st.TailscaleMode != "" && st.TailscaleMode != mode)
+}
+
+// randomToken returns 128 random bits, hex-encoded.
+func randomToken() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 func newID(prefix string) string {
@@ -390,6 +402,7 @@ func (c *Core) syncBuiltinSSH() error {
 	if err != nil {
 		return err
 	}
+	c.hostKey = hk.PublicLine
 	ln, err := c.node.Listen("tcp", fmt.Sprintf(":%d", agent.SSHPort))
 	if err != nil {
 		return err
@@ -398,7 +411,11 @@ func (c *Core) syncBuiltinSSH() error {
 		HostKey:   hk.Signer,
 		Auth:      c.authorizeSSH,
 		Logf:      c.logs.Printf,
-		OnSession: func(peer, kind string) { c.logs.Session.Printf("%s opened an SSH %s", peer, kind) },
+		OnSession: func(peer, kind string) { c.logs.Session.Printf("%q opened an SSH %s", peer, kind) },
+		Admit: func(ctx context.Context, remote string) bool {
+			cl, err := c.Identify(ctx, remote)
+			return err == nil && c.Access(cl.NodeID) == store.AccessFull
+		},
 	}
 	c.sshSrv = srv
 	go func() {
@@ -455,4 +472,52 @@ func (c *Core) appExe() string {
 		return c.opts.AppExe
 	}
 	return c.opts.Exe
+}
+
+func (c *Core) hostKeyLine() string {
+	c.sshMu.Lock()
+	defer c.sshMu.Unlock()
+	return c.hostKey
+}
+
+// validateSettings rejects values the UI would never send.
+func validateSettings(s *store.Settings) error {
+	if s.LocalSSHPort <= 0 || s.LocalSSHPort > 65535 {
+		return errors.New("SSH port must be between 1 and 65535")
+	}
+	if !store.ValidAccess(s.OwnDeviceAccess) {
+		return errors.New("invalid access level")
+	}
+	switch s.TailscaleMode {
+	case "", "embedded", "app":
+	default:
+		return errors.New("invalid connection mode")
+	}
+	switch s.Theme {
+	case "", "system", "light", "dark":
+	default:
+		return errors.New("invalid theme")
+	}
+	if s.Terminal != "" && !slices.Contains(launch.Terminals(), s.Terminal) {
+		return errors.New("unknown terminal")
+	}
+	if s.ControlURL != "" {
+		u, err := url.Parse(s.ControlURL)
+		if err != nil || (u.Scheme != "https" && !(u.Scheme == "http" && (u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1"))) || u.Host == "" {
+			return errors.New("control server must be an https:// URL")
+		}
+	}
+	if s.Hostname != "" && SafeName(s.Hostname) != s.Hostname {
+		return errors.New("invalid device name")
+	}
+	for _, id := range s.EnabledApps {
+		if _, ok := launch.FindBuiltin(id); !ok {
+			return fmt.Errorf("unknown app %q", id)
+		}
+	}
+	a := s.Alerts
+	if a.GPUTempC < 0 || a.GPUTempC > 150 || a.DiskPct < 0 || a.DiskPct > 100 || a.MemPct < 0 || a.MemPct > 100 {
+		return errors.New("alert thresholds out of range")
+	}
+	return nil
 }

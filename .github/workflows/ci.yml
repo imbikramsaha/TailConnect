@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+# Actions are pinned to commit SHAs (tags can be moved); update them
+# deliberately. Release builds never use the shared Go cache.
+
 jobs:
   test:
     strategy:
@@ -17,8 +20,10 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
       - name: Linux window deps
@@ -30,6 +35,9 @@ jobs:
       - name: Vet Linux window helper
         if: runner.os == 'Linux'
         run: go vet -tags webkit ./internal/window ./cmd/tailconnect-window
+      - name: Known vulnerabilities
+        if: runner.os == 'Linux'
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
       - name: Test (race)
         if: runner.os != 'Windows'
         run: go test -race -count=1 -timeout 20m ./...
@@ -39,37 +47,49 @@ jobs:
         if: runner.os == 'Windows'
         run: go test -count=1 -timeout 20m ./...
 
-  macos:
-    needs: test
+  check-tag:
     if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tag must be a plain version
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "bad tag: $GITHUB_REF_NAME"; exit 1; }
+
+  macos:
+    needs: [test, check-tag]
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
+          cache: false
       - run: scripts/build-macos.sh "${GITHUB_REF_NAME}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos
           path: dist/*.dmg
 
   windows:
-    needs: test
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, check-tag]
     runs-on: windows-latest
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
-      - name: Inno Setup
-        run: command -v iscc || [ -x "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" ] || choco install innosetup -y --no-progress
+          cache: false
+      - name: Inno Setup (preinstalled on the runner image)
+        run: '[ -x "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" ] || { echo "Inno Setup 6 missing from runner image"; exit 1; }'
       - run: scripts/build-windows.sh "${GITHUB_REF_NAME}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows
           path: |
@@ -77,20 +97,22 @@ jobs:
             dist/*-windows-amd64.zip
 
   linux:
-    needs: test
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, check-tag]
     strategy:
       matrix:
         runner: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
+          cache: false
       - run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
       - run: scripts/build-linux.sh "${GITHUB_REF_NAME}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-${{ matrix.runner }}
           path: |
@@ -98,14 +120,19 @@ jobs:
             dist/*.deb
             dist/*.rpm
 
-  release:
+  # Creates a DRAFT release. Installed apps ignore drafts and only accept
+  # updates whose SHA256SUMS carry the maintainer's offline signature, which
+  # scripts/publish-release.sh adds before publishing.
+  draft-release:
     needs: [macos, windows, linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true
@@ -115,8 +142,9 @@ jobs:
           V="${GITHUB_REF_NAME#v}"
           SHA=$(sha256sum "dist/TailConnect-$V-macos.dmg" | cut -d' ' -f1)
           sed -e "s/\"VERSION\"/\"$V\"/" -e "s/\"SHA256\"/\"$SHA\"/" packaging/homebrew/tailconnect.rb > dist/tailconnect.rb
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          prerelease: true
-          generate_release_notes: true
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --draft --prerelease --generate-notes --title "TailConnect ${GITHUB_REF_NAME#v}"

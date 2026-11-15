@@ -64,70 +64,88 @@ func TestServerAuthAndRoutes(t *testing.T) {
 	s, base := startServer(t)
 	bearer := map[string]string{"Authorization": "Bearer " + s.Token}
 
-	if r, body := do(t, "GET", base+"/", nil); r.StatusCode != 401 || !strings.Contains(body, "not signed in") {
-		t.Errorf("unauthenticated page: %d", r.StatusCode)
+	// The page shell is public (no secrets); the API is not.
+	if r, body := do(t, "GET", base+"/", nil); r.StatusCode != 200 || !strings.Contains(body, "app.js") {
+		t.Errorf("index: %d", r.StatusCode)
+	} else if csp := r.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "object-src 'none'") || !strings.Contains(csp, "frame-ancestors 'none'") {
+		t.Errorf("CSP: %q", csp)
 	}
 	if r, _ := do(t, "GET", base+"/api/state", nil); r.StatusCode != 401 {
 		t.Errorf("unauthenticated api: %d", r.StatusCode)
 	}
-	if r, _ := do(t, "GET", base+"/auth?t=wrong", nil); r.StatusCode != 401 {
-		t.Errorf("bad ticket: %d", r.StatusCode)
+	if r, _ := do(t, "POST", base+"/", nil); r.StatusCode != 405 {
+		t.Errorf("POST page: %d", r.StatusCode)
 	}
-	// The long-lived API token is never accepted as a sign-in ticket.
+
+	// Sign-in: single-use ticket -> session in the URL fragment, no cookie.
 	if r, _ := do(t, "GET", base+"/auth?t="+s.Token, nil); r.StatusCode != 401 {
-		t.Errorf("token accepted as ticket: %d", r.StatusCode)
+		t.Errorf("CLI token accepted as a ticket: %d", r.StatusCode)
 	}
 	login := s.LoginURL("#/settings")
 	if strings.Contains(login, s.Token) {
 		t.Fatal("login URL contains the API token")
 	}
 	r, _ := do(t, "GET", login, nil)
-	if r.StatusCode != 302 || r.Header.Get("Location") != "/#/settings" {
-		t.Fatalf("auth redirect: %d %q", r.StatusCode, r.Header.Get("Location"))
+	loc := r.Header.Get("Location")
+	if r.StatusCode != 302 || !strings.HasPrefix(loc, "/#s=") || !strings.HasSuffix(loc, "&r=%2Fsettings") {
+		t.Fatalf("auth redirect: %d %q", r.StatusCode, loc)
+	}
+	if len(r.Cookies()) != 0 {
+		t.Errorf("sign-in set a cookie: %v", r.Cookies())
+	}
+	if strings.Contains(loc, s.Token) {
+		t.Error("redirect leaks the API token")
 	}
 	if r2, _ := do(t, "GET", login, nil); r2.StatusCode != 401 {
 		t.Errorf("ticket reused: %d", r2.StatusCode)
 	}
-	var cookie string
-	for _, c := range r.Cookies() {
-		if c.Name == cookieName {
-			cookie = c.Name + "=" + c.Value
-			if !c.HttpOnly || c.SameSite != http.SameSiteStrictMode {
-				t.Errorf("cookie flags: %+v", c)
-			}
-		}
+	sess := strings.TrimPrefix(strings.SplitN(loc, "&", 2)[0], "/#s=")
+	if r, _ := do(t, "GET", s.LoginURL("#/x&evil=1"), nil); !strings.HasSuffix(r.Header.Get("Location"), "&r=") {
+		t.Errorf("unsafe route passed through: %q", r.Header.Get("Location"))
 	}
-	withCookie := map[string]string{"Cookie": cookie}
-	if r, body := do(t, "GET", base+"/", withCookie); r.StatusCode != 200 || !strings.Contains(body, "app.js") {
-		t.Errorf("index: %d", r.StatusCode)
-	}
-	if r, body := do(t, "GET", base+"/app.js", withCookie); r.StatusCode != 200 || !strings.Contains(body, "TailConnect") {
-		t.Errorf("app.js: %d", r.StatusCode)
-	}
-	if r, _ := do(t, "POST", base+"/", withCookie); r.StatusCode != 405 {
-		t.Errorf("POST page: %d", r.StatusCode)
-	}
-	r, body := do(t, "GET", base+"/api/state", bearer)
+
+	withSess := map[string]string{"Authorization": "Bearer " + sess}
+	r, body := do(t, "GET", base+"/api/state", withSess)
 	if r.StatusCode != 200 {
-		t.Fatalf("state: %d %s", r.StatusCode, body)
+		t.Fatalf("state with session: %d %s", r.StatusCode, body)
 	}
 	var v core.View
 	if err := json.Unmarshal([]byte(body), &v); err != nil || v.Version != "test" {
 		t.Errorf("state body: %v %+v", err, v.Version)
 	}
-	// Mutations need the CSRF header, even with a valid cookie.
-	if r, _ := do(t, "PUT", base+"/api/settings", withCookie); r.StatusCode != 403 {
+	if r, _ := do(t, "GET", base+"/api/state", map[string]string{"Authorization": "Bearer " + strings.Repeat("0", 64)}); r.StatusCode != 401 {
+		t.Errorf("made-up session accepted: %d", r.StatusCode)
+	}
+	// Mutations need the CSRF header.
+	if r, _ := do(t, "PUT", base+"/api/settings", withSess); r.StatusCode != 403 {
 		t.Errorf("missing csrf header: %d", r.StatusCode)
 	}
-	h := map[string]string{"Cookie": cookie, csrfHeader: "1"}
+	h := map[string]string{"Authorization": "Bearer " + sess, csrfHeader: "1"}
 	if r, body := do(t, "PUT", base+"/api/settings", h); r.StatusCode != 200 {
 		t.Errorf("settings: %d %s", r.StatusCode, body)
+	}
+	// Settings are validated.
+	req, _ := http.NewRequest("PUT", base+"/api/settings", strings.NewReader(`{"ownDeviceAccess":"root"}`))
+	for k, v := range h {
+		req.Header.Set(k, v)
+	}
+	if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != 400 {
+		t.Errorf("invalid setting accepted: %v %v", err, resp)
+	}
+	// Other sites — including another port on 127.0.0.1 — are refused.
+	for _, site := range []string{"cross-site", "same-site"} {
+		hh := map[string]string{"Authorization": "Bearer " + sess, "Sec-Fetch-Site": site}
+		if r, _ := do(t, "GET", base+"/api/state", hh); r.StatusCode != 403 {
+			t.Errorf("Sec-Fetch-Site %s: %d", site, r.StatusCode)
+		}
 	}
 	// DNS-rebinding defence.
 	if r, _ := do(t, "GET", base+"/api/state", map[string]string{"Authorization": bearer["Authorization"], "Host": "evil.example:1234"}); r.StatusCode != 403 {
 		t.Errorf("foreign host: %d", r.StatusCode)
 	}
-	if r, _ := do(t, "GET", base+"/icon.png", nil); r.StatusCode != 200 {
-		t.Errorf("icon: %d", r.StatusCode)
+	// Ping proves knowledge of the token without revealing it.
+	r, body = do(t, "GET", base+"/ping?n=0123456789abcdef0123", nil)
+	if r.StatusCode != 200 || !strings.Contains(body, PingMAC(s.Token, "0123456789abcdef0123")) || strings.Contains(body, s.Token) {
+		t.Errorf("ping: %d %s", r.StatusCode, body)
 	}
 }

@@ -6,7 +6,9 @@ package ui
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
 	"encoding/hex"
@@ -28,6 +30,7 @@ import (
 	"github.com/imbikramsaha/tailconnect/internal/launch"
 	"github.com/imbikramsaha/tailconnect/internal/logx"
 	"github.com/imbikramsaha/tailconnect/internal/netx"
+	"github.com/imbikramsaha/tailconnect/internal/sshx"
 	"github.com/imbikramsaha/tailconnect/internal/store"
 )
 
@@ -35,7 +38,6 @@ import (
 var staticFS embed.FS
 
 const (
-	cookieName = "tc_session"
 	csrfHeader = "X-TailConnect"
 	// DefaultPort is tried first for the control API.
 	DefaultPort = 47474
@@ -56,8 +58,9 @@ type Server struct {
 	port int
 	srv  *http.Server
 
-	tmu     sync.Mutex
-	tickets map[string]time.Time // one-time window sign-in tickets
+	tmu      sync.Mutex
+	tickets  map[string]time.Time // one-time window sign-in tickets
+	sessions map[string]struct{}  // UI window sessions (never the CLI token)
 }
 
 // Listen binds the control API on loopback, preferring DefaultPort.
@@ -80,6 +83,7 @@ func (s *Server) Serve(ln net.Listener) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /auth", s.auth)
+	mux.HandleFunc("GET /ping", s.ping)
 	mux.HandleFunc("GET /icon.png", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		w.Header().Set("Cache-Control", "max-age=86400")
@@ -88,7 +92,6 @@ func (s *Server) Serve(ln net.Listener) error {
 	mux.Handle("/", s.page(files)) // methodless so the more specific "/api/" wins
 
 	api := http.NewServeMux()
-	api.HandleFunc("GET /api/ping", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, map[string]string{"status": "ok"}) })
 	api.HandleFunc("GET /api/state", s.state)
 	api.HandleFunc("GET /api/events", s.eventsSSE)
 	api.HandleFunc("POST /api/show", s.show)
@@ -190,18 +193,55 @@ func (s *Server) hostCheck(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		// API calls only come from our own page (or the CLI, which sends no
+		// Sec-Fetch headers). Reject other sites — including other ports on
+		// 127.0.0.1, which browsers consider "same-site".
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			if v := r.Header.Get("Sec-Fetch-Site"); v != "" && v != "same-origin" {
+				http.Error(w, "cross-origin request refused", http.StatusForbidden)
+				return
+			}
+		}
 		next.ServeHTTP(w, r)
 	})
 }
 
+// authed accepts the CLI token or a window session, sent as a bearer header
+// only. There is deliberately no cookie: browsers share 127.0.0.1 cookies
+// across ports, so any other local web server could receive it.
 func (s *Server) authed(r *http.Request) bool {
-	tok := ""
-	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
-		tok = strings.TrimPrefix(h, "Bearer ")
-	} else if c, err := r.Cookie(cookieName); err == nil {
-		tok = c.Value
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, "Bearer ") {
+		return false
 	}
-	return tok != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(s.Token)) == 1
+	tok := strings.TrimPrefix(h, "Bearer ")
+	if tok != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(s.Token)) == 1 {
+		return true
+	}
+	s.tmu.Lock()
+	_, ok := s.sessions[tok]
+	s.tmu.Unlock()
+	return ok && len(tok) == 64
+}
+
+// ping lets the CLI check it's talking to the real TailConnect before it
+// sends its token: the answer is an HMAC of the caller's nonce, keyed with
+// the token (a program squatting on the port can't compute it).
+func (s *Server) ping(w http.ResponseWriter, r *http.Request) {
+	n := r.URL.Query().Get("n")
+	if len(n) < 16 || len(n) > 128 {
+		http.Error(w, "bad nonce", http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]string{"mac": PingMAC(s.Token, n)})
+}
+
+// PingMAC is the expected /ping answer for nonce under token.
+func PingMAC(token, nonce string) string {
+	m := hmac.New(sha256.New, []byte(token))
+	m.Write([]byte("tailconnect-ping\n" + nonce))
+	return hex.EncodeToString(m.Sum(nil))
 }
 
 func (s *Server) guard(next http.Handler) http.Handler {
@@ -231,17 +271,25 @@ func (s *Server) auth(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, signedOutPage)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name: cookieName, Value: s.Token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode,
-	})
+	sess := randomHex(32)
+	s.tmu.Lock()
+	if s.sessions == nil {
+		s.sessions = map[string]struct{}{}
+	}
+	s.sessions[sess] = struct{}{}
+	s.tmu.Unlock()
 	if s.Logs != nil {
 		s.Logs.Printf("ui: window signed in (%s)", r.UserAgent())
 	}
-	next := r.URL.Query().Get("next")
-	if !strings.HasPrefix(next, "#/") || strings.ContainsAny(next, "\r\n") {
-		next = ""
+	route := strings.TrimPrefix(r.URL.Query().Get("next"), "#")
+	if !strings.HasPrefix(route, "/") || strings.ContainsAny(route, "\r\n&#?\\ ") {
+		route = ""
 	}
-	http.Redirect(w, r, "/"+next, http.StatusFound)
+	// The session travels in the fragment (never sent to a server, kept out
+	// of logs/Referer); the page moves it into per-tab storage, which unlike
+	// cookies is isolated by port.
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, "/#s="+sess+"&r="+url.QueryEscape(route), http.StatusFound)
 }
 
 const signedOutPage = `<!doctype html><meta charset="utf-8"><title>TailConnect</title>
@@ -255,13 +303,9 @@ func (s *Server) page(files http.Handler) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if !s.authed(r) {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = io.WriteString(w, signedOutPage)
-			return
-		}
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self'")
+		// The page and its scripts hold no secrets; the API needs a session.
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "+
+			"connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 		w.Header().Set("Cache-Control", "no-cache")
 		files.ServeHTTP(w, r)
 	})
@@ -372,6 +416,13 @@ func (s *Server) addSSH(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dev, err := s.Core.AddSSHDevice(r.Context(), req)
+	var confirm *sshx.ErrConfirmHostKey
+	if errors.As(err, &confirm) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "confirm host key", "hostKey": confirm.Fingerprint})
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return

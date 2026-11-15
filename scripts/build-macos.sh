@@ -26,6 +26,10 @@ export CGO_ENABLED=1 MACOSX_DEPLOYMENT_TARGET=13.0
 # The webview library's header trips a clang deprecation warning; harmless.
 export CGO_CXXFLAGS="-Wno-deprecated-literal-operator"
 LDFLAGS="-s -w -X main.version=$VERSION -extldflags=-Wl,-no_warn_duplicate_libraries"
+# With a Developer ID, pin updates to that team (set TEAM_ID=ABCDE12345).
+if [[ -n "${TEAM_ID:-}" ]]; then
+  LDFLAGS="$LDFLAGS -X github.com/imbikramsaha/tailconnect/internal/update.TeamID=$TEAM_ID"
+fi
 for arch in arm64 amd64; do
   GOOS=darwin GOARCH=$arch go build -trimpath -ldflags "$LDFLAGS" -o "$BUILD/tailconnect-$arch" ./cmd/tailconnect
 done

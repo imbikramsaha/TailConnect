@@ -418,12 +418,33 @@ func ErrNoSSH(dev store.Device) error {
 // applyHello updates a saved peer from its latest hello: login details,
 // which SSH server to use, and Wake-on-LAN info.
 func (c *Core) applyHello(dev store.Device, h *agent.Hello) {
+	hc := *h
+	h = &hc
+	h.User, _ = SafeUser(h.User)
+	h.Home, _ = SafeHome(h.Home)
+	h.OS = SafeOS(h.OS)
+	if h.SSHPort < 0 || h.SSHPort > 65535 {
+		h.SSHPort = 0
+	}
+	if h.BuiltinSSH != 0 && h.BuiltinSSH != agent.SSHPort {
+		h.BuiltinSSH = 0
+	}
+	h.MACs, h.LANs = safeMACs(h.MACs), safeLANs(h.LANs)
 	port := h.SSHPort
 	if h.BuiltinSSH > 0 {
 		port = h.BuiltinSSH
 	}
 	if port == 0 {
 		port = 22
+	}
+	// The built-in server's host key comes over the authenticated tailnet
+	// API: pin it. A switch to the system SSH server needs a new TOFU entry.
+	if h.BuiltinSSH != 0 && h.HostKey != "" {
+		if err := c.known.Pin(dev.Alias, h.HostKey); err != nil {
+			c.logs.Printf("pin host key for %s: %v", dev.Name, err)
+		}
+	} else if port != dev.Port && dev.Port == agent.SSHPort {
+		_ = c.known.Forget(dev.Alias)
 	}
 	macs, lans := dev.MACs, dev.LANs
 	if len(h.MACs) > 0 {
@@ -432,9 +453,6 @@ func (c *Core) applyHello(dev store.Device, h *agent.Hello) {
 	if h.User == dev.User && h.Home == dev.Home && h.OS == dev.OS && port == dev.Port &&
 		slices.Equal(macs, dev.MACs) && slices.Equal(lans, dev.LANs) {
 		return
-	}
-	if port != dev.Port && dev.Port != 0 {
-		_ = c.known.Forget(dev.Alias) // different SSH server, different host key
 	}
 	_ = c.store.Update(func(st *store.State) error {
 		if i := st.FindDevice(dev.ID); i >= 0 {

@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
+	"unicode"
 
 	"github.com/imbikramsaha/tailconnect/internal/store"
 )
@@ -42,11 +44,45 @@ func cfgPath(p string) string {
 	return `"` + p + `"`
 }
 
-// Render produces the managed config file contents.
+var (
+	aliasRe = regexp.MustCompile(`^tc-[a-z0-9-]{1,60}$`)
+	hostRe  = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,253}$`)
+	idRe    = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
+)
+
+// safeEntry rejects anything that could inject ssh_config directives: every
+// value is written verbatim, so a newline or quote from a hostile device
+// name/user would otherwise add e.g. "Host *" + "ProxyCommand".
+func safeEntry(e Entry) bool {
+	ok := func(s string) bool {
+		return !strings.ContainsFunc(s, unicode.IsControl) && !strings.ContainsAny(s, "\"\\%#`")
+	}
+	if !aliasRe.MatchString(e.Alias) || (e.HostName != "" && !hostRe.MatchString(e.HostName)) ||
+		(e.DeviceID != "" && !idRe.MatchString(e.DeviceID)) || !ok(e.User) || len(e.User) > 64 ||
+		strings.HasPrefix(e.User, "-") || e.Port < 0 || e.Port > 65535 {
+		return false
+	}
+	return true
+}
+
+func safePath(p string) bool {
+	return !strings.ContainsFunc(p, unicode.IsControl) && !strings.ContainsAny(p, "\"%")
+}
+
+// Render produces the managed config file contents. Entries with unsafe
+// values are left out.
 func Render(entries []Entry, o Options) string {
 	var b strings.Builder
 	b.WriteString("# Managed by TailConnect. Changes are overwritten; edit devices in the app.\n\n")
+	if !safePath(o.Exe) || !safePath(o.KeyPath) || !safePath(o.KnownHosts) {
+		b.WriteString("# Skipped: TailConnect's install path contains characters ssh can't use.\n")
+		return b.String()
+	}
 	for _, e := range entries {
+		if !safeEntry(e) {
+			fmt.Fprintf(&b, "# Skipped a device with unsafe settings.\n\n")
+			continue
+		}
 		fmt.Fprintf(&b, "Host %s\n", e.Alias)
 		host := e.HostName
 		if e.Proxy || host == "" {
@@ -54,7 +90,11 @@ func Render(entries []Entry, o Options) string {
 		}
 		fmt.Fprintf(&b, "  HostName %s\n", host)
 		if e.User != "" {
-			fmt.Fprintf(&b, "  User %s\n", e.User)
+			u := e.User
+			if strings.Contains(u, " ") {
+				u = `"` + u + `"` // e.g. Windows accounts with spaces
+			}
+			fmt.Fprintf(&b, "  User %s\n", u)
 		}
 		port := e.Port
 		if port == 0 {

@@ -65,6 +65,17 @@ func (c *Core) Identify(ctx context.Context, remoteAddr string) (agent.Caller, e
 	if w.Node == nil {
 		return agent.Caller{}, errors.New("unknown node")
 	}
+	// Never accept this device itself as a caller. With the Tailscale app
+	// in TUN mode, any local process (including other OS users) can connect
+	// to this machine's own Tailscale IP; WhoIs then reports our own node —
+	// same Tailscale user — which would otherwise be auto-trusted.
+	self, err := c.selfNode(ctx)
+	if err != nil {
+		return agent.Caller{}, err
+	}
+	if string(w.Node.StableID) == self {
+		return agent.Caller{}, errors.New("connections from this device itself are not accepted")
+	}
 	cl := agent.Caller{
 		NodeID: string(w.Node.StableID),
 		Name:   w.Node.ComputedName,
@@ -79,6 +90,24 @@ func (c *Core) Identify(ctx context.Context, remoteAddr string) (agent.Caller, e
 		cl.UserID = int64(w.UserProfile.ID)
 	}
 	return cl, nil
+}
+
+// selfNode returns this device's tailnet node ID (fetched if not yet known).
+func (c *Core) selfNode(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	id := c.selfNodeID
+	c.mu.Unlock()
+	if id != "" {
+		return id, nil
+	}
+	st, err := c.node.Status(ctx)
+	if err != nil || st.Self == nil || st.Self.ID == "" {
+		return "", errors.New("tailnet identity not known yet")
+	}
+	c.mu.Lock()
+	c.selfNodeID = string(st.Self.ID)
+	c.mu.Unlock()
+	return string(st.Self.ID), nil
 }
 
 // Hello describes this device to caller cl with the given access level.
@@ -97,12 +126,16 @@ func (c *Core) Hello(_ agent.Caller, access string) agent.Hello {
 		Trusted:  access != "",
 		Access:   access,
 	}
-	if access != "" {
-		h.User, h.Home = c.osUser, c.home
+	// Reveal only what the caller's access level needs.
+	if store.AccessRank(access) >= store.AccessRank(store.AccessPorts) && access != "" {
 		h.MACs, h.LANs = c.lanInfo()
 	}
-	if access == store.AccessFull && c.builtinSSHRunning() {
-		h.BuiltinSSH = agent.SSHPort
+	if access == store.AccessFull {
+		h.User, h.Home = c.osUser, c.home
+		if c.builtinSSHRunning() {
+			h.BuiltinSSH = agent.SSHPort
+			h.HostKey = c.hostKeyLine()
+		}
 	}
 	return h
 }
@@ -154,7 +187,7 @@ func (c *Core) AllowPort(nodeID string, port int) bool {
 // Event records an access event from a peer and notifies when useful.
 func (c *Core) Event(cl agent.Caller, kind, detail string) {
 	name := c.trustedName(cl)
-	c.logs.Session.Printf("%s: %s %s", name, kind, detail)
+	c.logs.Session.Printf("%q: %s %q", name, kind, detail)
 	switch kind {
 	case "file":
 		c.notify("File received from "+name, filepath.Base(detail)+" was saved to Downloads/TailConnect", "")
@@ -183,6 +216,11 @@ func (c *Core) HandlePair(_ context.Context, cl agent.Caller, req agent.PairRequ
 	if err != nil {
 		return agent.PairResponse{Status: agent.PairDenied, Message: err.Error()}
 	}
+	req.Name = SafeName(req.Name)
+	if req.Name == "" {
+		req.Name = SafeName(cl.Name)
+	}
+	req.OS = SafeOS(req.OS)
 	st := c.store.Get()
 	c.mu.Lock()
 	selfUser, selfNode := c.selfUserID, c.selfNodeID
@@ -190,18 +228,37 @@ func (c *Core) HandlePair(_ context.Context, cl agent.Caller, req agent.PairRequ
 	code := PairCode(cl.NodeID, pub, selfNode)
 	auto := st.Settings.AutoTrustOwnDevices && !cl.Tagged && cl.UserID != 0 && cl.UserID == selfUser &&
 		!slices.Contains(st.Ignored, cl.NodeID)
-	if t, ok := st.Trust(cl.NodeID); ok || auto {
+	t, trusted := st.Trust(cl.NodeID)
+	switch {
+	case trusted && t.PublicKey == pub:
+		// Re-pairing with the same key: nothing changes.
+		return c.approvedResponse(cl, code)
+	case trusted && !auto:
+		// A different key for a device paired by approval: another process
+		// on that machine could be trying to take over its access. Ask again.
+		c.logs.Session.Printf("%q presented a new key; approval required", req.Name)
+	case auto:
 		level := st.Settings.OwnDeviceAccess
-		if ok {
-			level = t.Level() // re-pairing keeps the granted level
+		if trusted {
+			level = t.Level()
 		}
 		if err := c.trust(cl, req.Name, pub, level, t.Ports); err != nil {
 			return agent.PairResponse{Status: agent.PairDenied, Message: err.Error()}
 		}
-		if auto && !ok {
+		if trusted {
+			c.logs.Session.Printf("own device %q (%s) re-paired with a new key", req.Name, cl.LoginName)
+			c.notify("Key changed for "+req.Name, "It was re-paired automatically because it's on your account. Review it in Settings → Devices & access.", "#/settings/access")
+		} else {
 			c.logs.Session.Printf("auto-trusted own device %q (%s) with %s access", req.Name, cl.LoginName, level)
+			c.notify(req.Name+" can now reach this computer", "Paired automatically because it's on your Tailscale account ("+accessWord(level)+"). Review in Settings → Devices & access.", "#/settings/access")
 		}
 		return c.approvedResponse(cl, code)
+	}
+	// Recently declined: don't re-ask (and re-notify) for an hour.
+	for _, p := range st.Pending {
+		if p.NodeID == cl.NodeID && p.Status == agent.PairDenied && time.Since(p.Created) < time.Hour {
+			return agent.PairResponse{Status: agent.PairDenied, Message: "the other device declined"}
+		}
 	}
 
 	var id string
@@ -209,8 +266,12 @@ func (c *Core) HandlePair(_ context.Context, cl agent.Caller, req agent.PairRequ
 	err = c.store.Update(func(s *store.State) error {
 		for i := range s.Pending {
 			if s.Pending[i].NodeID == cl.NodeID && s.Pending[i].Status == agent.PairPending {
-				s.Pending[i].Name, s.Pending[i].PublicKey, s.Pending[i].OS, s.Pending[i].Code = req.Name, pub, req.OS, code
-				id = s.Pending[i].ID
+				pp := &s.Pending[i]
+				id = pp.ID
+				if pp.Name == req.Name && pp.PublicKey == pub && pp.OS == req.OS && pp.Code == code {
+					return errUnchanged
+				}
+				pp.Name, pp.PublicKey, pp.OS, pp.Code = req.Name, pub, req.OS, code
 				return nil
 			}
 		}
@@ -221,7 +282,7 @@ func (c *Core) HandlePair(_ context.Context, cl agent.Caller, req agent.PairRequ
 		})
 		return nil
 	})
-	if err != nil {
+	if err != nil && !errors.Is(err, errUnchanged) {
 		return agent.PairResponse{Status: agent.PairDenied, Message: err.Error()}
 	}
 	if isNew {
@@ -264,6 +325,35 @@ func (c *Core) PairStatus(cl agent.Caller, id string) agent.PairResponse {
 func (c *Core) Unpair(cl agent.Caller) error {
 	c.logs.Session.Printf("device %q unpaired itself", cl.Name)
 	return c.untrust(cl.NodeID)
+}
+
+var errUnchanged = errors.New("unchanged")
+
+func accessWord(level string) string {
+	switch level {
+	case store.AccessStats:
+		return "monitor only"
+	case store.AccessPorts:
+		return "ports & monitor"
+	}
+	return "full access"
+}
+
+// PeerKey returns the key nodeID paired with.
+func (c *Core) PeerKey(nodeID string) string {
+	st := c.store.Get()
+	if t, ok := st.Trust(nodeID); ok {
+		return t.PublicKey
+	}
+	return ""
+}
+
+// PendingKey returns the key of nodeID's pending request id.
+func (c *Core) PendingKey(nodeID, id string) string {
+	if p, ok := c.pending(id); ok && p.NodeID == nodeID {
+		return p.PublicKey
+	}
+	return ""
 }
 
 // ---- trust management ----
@@ -309,6 +399,9 @@ func (c *Core) untrust(nodeID string) error {
 		return nil
 	})
 	c.dropSSHSessions(nodeID)
+	if c.agentSrv != nil {
+		c.agentSrv.CloseNode(nodeID)
+	}
 	c.events.Notify()
 	return errors.Join(errKey, err)
 }
@@ -342,6 +435,9 @@ func (c *Core) SetAccess(nodeID, level string, ports []int) error {
 	if level != store.AccessFull {
 		c.dropSSHSessions(nodeID)
 	}
+	if c.agentSrv != nil && (store.AccessRank(level) < store.AccessRank(t.Level()) || len(ports) > 0) {
+		c.agentSrv.CloseNode(nodeID) // reopen with the new rules
+	}
 	c.logs.Session.Printf("access for %q set to %s%s", t.Name, level, portsNote(ports))
 	c.events.Notify()
 	return err
@@ -359,9 +455,6 @@ func (c *Core) ApprovePair(id string, approve bool, level string) error {
 	p, ok := c.pending(id)
 	if !ok || p.Status != agent.PairPending {
 		return errors.New("no such pending request")
-	}
-	if level == "" {
-		level = store.AccessFull
 	}
 	if approve && !store.ValidAccess(level) {
 		return errors.New("access must be full, ports or stats")
@@ -383,6 +476,10 @@ func (c *Core) ApprovePair(id string, approve bool, level string) error {
 		return err
 	}
 	cl := agent.Caller{NodeID: p.NodeID, Name: p.NodeName, LoginName: p.LoginName, UserID: p.UserID}
+	_ = c.store.Update(func(st *store.State) error {
+		st.Ignored = slices.DeleteFunc(st.Ignored, func(s string) bool { return s == p.NodeID })
+		return nil
+	})
 	if err := c.trust(cl, p.Name, p.PublicKey, level, nil); err != nil {
 		return err
 	}
@@ -403,6 +500,14 @@ func (c *Core) ApprovePair(id string, approve bool, level string) error {
 // RevokeTrust stops a device from accessing this one.
 func (c *Core) RevokeTrust(nodeID string) error {
 	c.logs.Session.Printf("revoked access for %s", nodeID)
+	// Block auto-pairing too, or a device on the same account would simply
+	// pair again. Pairing it again by hand (or approving a request) lifts it.
+	_ = c.store.Update(func(st *store.State) error {
+		if !slices.Contains(st.Ignored, nodeID) {
+			st.Ignored = append(st.Ignored, nodeID)
+		}
+		return nil
+	})
 	return c.untrust(nodeID)
 }
 
@@ -527,36 +632,40 @@ func (c *Core) runPair(nodeID string, auto bool) {
 }
 
 func displayName(p peerInfo) string {
-	if p.Hello != nil && p.Hello.Name != "" {
-		return p.Hello.Name
+	if p.Hello != nil {
+		if n := SafeName(p.Hello.Name); n != "" {
+			return n
+		}
 	}
-	if p.HostName != "" {
-		return p.HostName
+	if n := SafeName(p.HostName); n != "" {
+		return n
 	}
-	return shortName(p.DNSName)
+	return SafeName(shortName(p.DNSName))
 }
 
 func (c *Core) savePeerDevice(p peerInfo, resp *agent.PairResponse) error {
+	user, _ := SafeUser(resp.User)
+	home, _ := SafeHome(resp.Home)
 	err := c.store.Update(func(st *store.State) error {
 		port := resp.SSHPort
-		if port == 0 {
+		if port <= 0 || port > 65535 {
 			port = 22
 		}
 		if i := st.FindDeviceByNode(p.NodeID); i >= 0 {
 			d := &st.Devices[i]
-			d.User, d.Home, d.Port = resp.User, resp.Home, port
+			d.User, d.Home, d.Port = user, home, port
 			if p.Hello != nil {
-				d.OS = p.Hello.OS
+				d.OS = SafeOS(p.Hello.OS)
 			}
 			return nil
 		}
 		name := displayName(p)
 		d := store.Device{
 			ID: "p-" + p.NodeID, Kind: store.KindPeer, Name: name, Alias: uniqueAlias(st, name, ""),
-			NodeID: p.NodeID, User: resp.User, Home: resp.Home, Port: port, AddedAt: time.Now(),
+			NodeID: p.NodeID, User: user, Home: home, Port: port, AddedAt: time.Now(),
 		}
 		if p.Hello != nil {
-			d.OS = p.Hello.OS
+			d.OS = SafeOS(p.Hello.OS)
 		}
 		st.Devices = append(st.Devices, d)
 		return nil

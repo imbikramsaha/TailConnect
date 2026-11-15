@@ -183,7 +183,9 @@ func (c *Core) autoPair() {
 		}
 		// A device that already trusts us (e.g. approved our request after
 		// we stopped waiting, or after a restart) just needs saving.
-		trustsUnsaved := p.Hello.Trusted && st.FindDeviceByNode(id) < 0
+		// Only if we asked to pair with it: "trusted" is the peer's own claim.
+		_, asked := c.outgoing[id]
+		trustsUnsaved := asked && p.Hello.Trusted && st.FindDeviceByNode(id) < 0
 		if !trustsUnsaved && (!st.Settings.AutoTrustOwnDevices || p.Tagged || p.UserID == 0 || p.UserID != c.selfUserID) {
 			continue
 		}

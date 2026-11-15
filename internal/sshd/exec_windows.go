@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -55,7 +56,16 @@ func commandLine(command string) string {
 }
 
 func sessionEnv(remote string, extra []string) []string {
-	env := os.Environ()
+	// TailConnect's own environment (e.g. TS_AUTHKEY) must not leak into
+	// sessions.
+	var env []string
+	for _, kv := range os.Environ() {
+		u := strings.ToUpper(kv)
+		if strings.HasPrefix(u, "TS_") || strings.HasPrefix(u, "TAILCONNECT_") || strings.HasPrefix(u, "TC_") {
+			continue
+		}
+		env = append(env, kv)
+	}
 	if host, port, err := net.SplitHostPort(remote); err == nil {
 		env = append(env, "SSH_CLIENT="+host+" "+port+" 4748")
 	}
@@ -95,6 +105,21 @@ func start(command string, env []string, pr *ptyReq, remote string, ch ssh.Chann
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	job, jerr := newKillJob()
+	if jerr == nil {
+		if h, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid)); err == nil {
+			_ = windows.AssignProcessToJobObject(job, h)
+			windows.CloseHandle(h)
+		}
+	}
+	var jobOnce sync.Once
+	closeJob := func() {
+		jobOnce.Do(func() {
+			if jerr == nil {
+				windows.CloseHandle(job) // kills the whole tree
+			}
+		})
+	}
 	go func() {
 		_, _ = io.Copy(stdin, ch)
 		stdin.Close()
@@ -103,6 +128,7 @@ func start(command string, env []string, pr *ptyReq, remote string, ch ssh.Chann
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
 		}
+		closeJob()
 	}
 	return &running{
 		resize: func(uint32, uint32) {},
@@ -113,6 +139,7 @@ func start(command string, env []string, pr *ptyReq, remote string, ch ssh.Chann
 		},
 		wait: func() int {
 			err := cmd.Wait()
+			defer closeJob()
 			var ee *exec.ExitError
 			if errors.As(err, &ee) {
 				return ee.ExitCode()
@@ -188,7 +215,7 @@ func startConPTY(cmdline string, env []string, dir string, pr *ptyReq, ch ssh.Ch
 		dirp, _ = windows.UTF16PtrFromString(dir)
 	}
 	err = windows.CreateProcess(nil, cl, nil, nil, false,
-		windows.EXTENDED_STARTUPINFO_PRESENT|windows.CREATE_UNICODE_ENVIRONMENT,
+		windows.EXTENDED_STARTUPINFO_PRESENT|windows.CREATE_UNICODE_ENVIRONMENT|windows.CREATE_SUSPENDED,
 		envBlock(env), dirp, &si.StartupInfo, &pi)
 	if err != nil {
 		windows.ClosePseudoConsole(hpc)
@@ -196,7 +223,22 @@ func startConPTY(cmdline string, env []string, dir string, pr *ptyReq, ch ssh.Ch
 		windows.CloseHandle(outR)
 		return nil, fmt.Errorf("starting shell: %w", err)
 	}
+	// Put the shell in a kill-on-close job before it runs, so nothing it
+	// starts outlives the session.
+	job, jerr := newKillJob()
+	if jerr == nil {
+		_ = windows.AssignProcessToJobObject(job, pi.Process)
+	}
+	_, _ = windows.ResumeThread(pi.Thread)
 	windows.CloseHandle(pi.Thread)
+	var jobOnce sync.Once
+	closeJob := func() {
+		jobOnce.Do(func() {
+			if jerr == nil {
+				windows.CloseHandle(job)
+			}
+		})
+	}
 	in := os.NewFile(uintptr(inW), "conpty-in")
 	out := os.NewFile(uintptr(outR), "conpty-out")
 	go func() { _, _ = io.Copy(in, ch) }()
@@ -247,10 +289,12 @@ func startConPTY(cmdline string, env []string, dir string, pr *ptyReq, ch ssh.Ch
 			case <-time.After(2 * time.Second):
 			}
 			out.Close()
+			closeJob()
 			return int(code)
 		},
 		hangup: func() {
 			_ = windows.TerminateProcess(pi.Process, 1)
+			closeJob()
 			go closeAll()
 		},
 	}, nil
@@ -281,4 +325,21 @@ func serveSFTP(ch ssh.Channel) {
 	}
 	_ = srv.Serve()
 	srv.Close()
+}
+
+// newKillJob returns a Job object that kills every process in it when the
+// handle is closed, so a session's whole process tree ends with the session.
+func newKillJob() (windows.Handle, error) {
+	job, err := windows.CreateJobObject(nil, nil)
+	if err != nil {
+		return 0, err
+	}
+	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
+	info.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil {
+		windows.CloseHandle(job)
+		return 0, err
+	}
+	return job, nil
 }

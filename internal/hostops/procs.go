@@ -149,8 +149,12 @@ func Kill(ctx context.Context, pid int) error {
 	if err != nil {
 		return fmt.Errorf("no process %d", pid)
 	}
-	owner, _ := p.UsernameWithContext(ctx)
-	if u, err := user.Current(); err == nil && owner != "" && !sameUser(owner, u.Username) {
+	owner, err := p.UsernameWithContext(ctx)
+	u, uerr := user.Current()
+	if err != nil || uerr != nil || owner == "" {
+		return fmt.Errorf("can't tell who owns process %d; not stopping it", pid)
+	}
+	if !sameUser(owner, u.Username) {
 		return fmt.Errorf("process %d belongs to %s; only your own processes can be stopped", pid, owner)
 	}
 	if runtime.GOOS == "windows" {

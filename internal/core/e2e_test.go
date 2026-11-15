@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/imbikramsaha/tailconnect/internal/agent"
 	"github.com/imbikramsaha/tailconnect/internal/logx"
+	"github.com/imbikramsaha/tailconnect/internal/sshkeys"
 	"github.com/imbikramsaha/tailconnect/internal/sshx"
 	"github.com/imbikramsaha/tailconnect/internal/store"
 	"github.com/imbikramsaha/tailconnect/internal/tailnet"
@@ -201,6 +203,20 @@ func TestAutoPairTunnelStatsAndRemove(t *testing.T) {
 		t.Errorf("alpha's key not authorized on bravo:\n%s", ak)
 	}
 
+	// A device must never accept itself as a caller (with the Tailscale app
+	// in TUN mode other local users could otherwise pose as an "own device").
+	selfIP := a.Snapshot(context.Background()).Tailnet.IPv4
+	sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_, err = a.agentCli.Hello(sctx, selfIP)
+	var se *agent.StatusError
+	if !errors.As(err, &se) || se.Code != http.StatusForbidden {
+		t.Errorf("self call: want 403 from the agent, got %v", err)
+	}
+	if r, err := a.agentCli.Pair(sctx, selfIP, agent.PairRequest{Name: "x", PublicKey: a.Identity().PublicLine}); err == nil && r.Status == agent.PairApproved {
+		t.Error("agent auto-paired with its own node")
+	}
+	scancel()
+
 	// Connect.
 	if err := a.Connect(devB.ID); err != nil {
 		t.Fatal(err)
@@ -334,6 +350,25 @@ func TestManualPairingApproval(t *testing.T) {
 		d, ok := deviceNamed(b, "alpha")
 		return ok && d.Section == SectionMine && d.TrustsUs
 	})
+	// Another process on alpha's machine can't take over its pairing by
+	// presenting a new key: that needs a fresh approval.
+	pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	bIP := func() string { d, _ := deviceNamed(a, "bravo"); return d.TailnetIP }()
+	ik, _ := sshkeys.LoadOrCreate(t.TempDir(), "intruder")
+	resp, err := agent.NewClient(a.node.Dial, ik.Signer).Pair(pctx, bIP, agent.PairRequest{Name: "alpha", PublicKey: ik.PublicLine})
+	pcancel()
+	if err != nil || resp.Status != agent.PairPending {
+		t.Fatalf("key swap: want a pending approval, got %+v %v", resp, err)
+	}
+	// Pairing with a key you don't hold is refused outright.
+	pctx, pcancel = context.WithTimeout(context.Background(), 10*time.Second)
+	_, err = agent.NewClient(a.node.Dial, ik.Signer).Pair(pctx, bIP, agent.PairRequest{Name: "x", PublicKey: b.Identity().PublicLine})
+	var se *agent.StatusError
+	if !errors.As(err, &se) || se.Code != http.StatusForbidden {
+		t.Errorf("pair request for someone else's key: want 403, got %v", err)
+	}
+	pcancel()
+
 	// bravo granted alpha monitor-only access.
 	waitFor(t, "alpha to learn its access level", 10*time.Second, func() bool {
 		d, _ := deviceNamed(a, "bravo")
@@ -367,6 +402,17 @@ func (c *Core) mustDevice(t *testing.T, id string) store.Device {
 		t.Fatalf("no device %s", id)
 	}
 	return d
+}
+
+// otherProcess returns an agent client on c's tailnet node but with its own
+// key: another program or OS user sharing that machine's Tailscale identity.
+func otherProcess(t *testing.T, c *Core) *agent.Client {
+	t.Helper()
+	k, err := sshkeys.LoadOrCreate(t.TempDir(), "intruder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return agent.NewClient(c.node.Dial, k.Signer)
 }
 
 func freePort(t *testing.T) (net.Listener, int) {
@@ -493,11 +539,38 @@ func TestBuiltinSSHServicesFilesAndAccess(t *testing.T) {
 		t.Errorf("diagnosis: %+v", diag)
 	}
 
+	// Another process on alpha's machine (same tailnet identity, different
+	// key) gets nothing: requests must be signed with the paired key.
+	bIP := devB.TailnetIP
+	intruder := otherProcess(t, a)
+	_, err = intruder.Stats(ctx, bIP)
+	var se *agent.StatusError
+	if !errors.As(err, &se) || se.Code != http.StatusForbidden {
+		t.Errorf("foreign-key request: want 403, got %v", err)
+	}
+	if h, err := intruder.Hello(ctx, bIP); err != nil || h.Trusted || h.User != "" || h.HostKey != "" {
+		t.Errorf("foreign-key hello revealed paired details: %+v %v", h, err)
+	}
+	if _, err := agent.NewClient(a.node.Dial, nil).Stats(ctx, bIP); err == nil {
+		t.Error("unsigned request was accepted")
+	}
+
+	// An open tunnel is closed when access is lowered.
+	tun, err := a.agentCli.Tunnel(ctx, bIP, port)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	// Lowering access to "ports" cuts SSH but keeps forwards.
 	alphaNode := a.Snapshot(ctx).Tailnet.NodeID
 	if err := b.SetAccess(alphaNode, "ports", nil); err != nil {
 		t.Fatal(err)
 	}
+	_ = tun.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := tun.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("tunnel stayed open after access was lowered: %v", err)
+	}
+	tun.Close()
 	if cl, err := sshx.Connect(ctx, a.sshParams(a.mustDevice(t, devB.ID), "")); err == nil {
 		cl.Close()
 		t.Error("built-in SSH still allowed with ports access")
@@ -640,5 +713,27 @@ func TestTailscaleAppMode(t *testing.T) {
 	// Logging out must never touch the user's Tailscale.
 	if err := a.Logout(ctx); err == nil {
 		t.Error("logout in app mode should be refused")
+	}
+}
+
+func TestRevokeStaysRevoked(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+	url := startControl(t, true)
+	a := newCore(t, url, "alpha", true)
+	b := newCore(t, url, "bravo", true)
+	dumpOnFail = []*Core{a, b}
+	waitFor(t, "auto-pair", 60*time.Second, func() bool {
+		d, ok := deviceNamed(b, "alpha")
+		return ok && d.TrustsUs && d.TrustedByUs
+	})
+	aNode := a.Snapshot(context.Background()).Tailnet.NodeID
+	if err := b.RevokeTrust(aNode); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Second) // many discovery/auto-pair cycles
+	if b.IsTrusted(aNode) {
+		t.Fatal("revoked own-account device was auto-paired again")
 	}
 }

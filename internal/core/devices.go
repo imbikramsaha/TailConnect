@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -23,6 +25,9 @@ type AddSSHRequest struct {
 	Port     int    `json:"port"`
 	User     string `json:"user"`
 	Password string `json:"password"`
+	// HostKey is the SHA256 fingerprint the user confirmed. When a password
+	// is given and this is empty, AddSSHDevice returns *sshx.ErrConfirmHostKey.
+	HostKey string `json:"hostKey"`
 	// Via is "direct", "tailnet" or "" (auto-detect).
 	Via string `json:"via"`
 }
@@ -36,8 +41,15 @@ func (c *Core) AddSSHDevice(ctx context.Context, req AddSSHRequest) (store.Devic
 	if req.Host == "" || req.User == "" {
 		return store.Device{}, errors.New("host and username are required")
 	}
-	if strings.ContainsAny(req.Host+req.User, " \t\n'\"`$;|&") {
-		return store.Device{}, errors.New("host or username contains invalid characters")
+	if !validHost(req.Host) {
+		return store.Device{}, errors.New("enter a hostname or IP address (letters, digits, dots, dashes, colons)")
+	}
+	if _, ok := SafeUser(req.User); !ok || strings.Contains(req.User, " ") {
+		return store.Device{}, errors.New("username contains invalid characters")
+	}
+	req.Name = SafeName(req.Name)
+	if req.Port < 0 || req.Port > 65535 {
+		return store.Device{}, errors.New("invalid port")
 	}
 	if req.Port == 0 {
 		req.Port = 22
@@ -70,7 +82,19 @@ func (c *Core) AddSSHDevice(ctx context.Context, req AddSSHRequest) (store.Devic
 	}
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	cl, err := sshx.Connect(ctx, c.sshParams(dev, req.Password))
+	// Never send a password to a server whose identity the user hasn't seen:
+	// show its fingerprint first (protects against LAN man-in-the-middle).
+	if req.Password != "" && req.HostKey == "" {
+		fp, err := sshx.HostKeyFingerprint(ctx, func(ctx context.Context) (net.Conn, error) { return c.sshDial(ctx, dev) })
+		if err != nil {
+			return rollback(err)
+		}
+		_, _ = rollback(nil)
+		return store.Device{}, &sshx.ErrConfirmHostKey{Fingerprint: fp}
+	}
+	params := c.sshParams(dev, req.Password)
+	params.ExpectHostKey = req.HostKey
+	cl, err := sshx.Connect(ctx, params)
 	if err != nil {
 		return rollback(err)
 	}
@@ -266,4 +290,11 @@ func (c *Core) Stats(ctx context.Context, id string) (*sysinfo.Stats, error) {
 	}
 	s := sysinfo.ParseRemote(out)
 	return s, nil
+}
+
+var hostRe = regexp.MustCompile(`^[A-Za-z0-9_.:\[\]-]{1,253}$`)
+
+// validHost accepts hostnames and IP literals only (no options or spaces).
+func validHost(h string) bool {
+	return hostRe.MatchString(h) && !strings.HasPrefix(h, "-") && !strings.HasPrefix(h, ".")
 }

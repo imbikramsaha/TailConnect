@@ -5,7 +5,9 @@ package update
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -33,7 +35,60 @@ type Release struct {
 	Assets  map[string]string `json:"-"` // name -> download URL
 }
 
-var client = &http.Client{Timeout: 30 * time.Second}
+// ReleaseKeys are the ed25519 public keys (base64) allowed to sign
+// releases. The private key is kept offline by the maintainer; CI cannot
+// sign, so a compromised repository or pipeline can't push an update.
+var ReleaseKeys = []string{
+	"bBlRWaSOYVipG6PdclZi7adlxdc3UxN7JM+LXHjdT6w=",
+}
+
+// TeamID, if set at build time (-X .../update.TeamID=ABCDE12345), is the
+// Apple developer team updates must be signed by on macOS.
+var TeamID = ""
+
+// allowedHosts are the only hosts downloads may come from (GitHub release
+// assets redirect to these).
+var allowedHosts = map[string]bool{
+	"api.github.com": true, "github.com": true, "objects.githubusercontent.com": true,
+	"release-assets.githubusercontent.com": true, "github-releases.githubusercontent.com": true,
+}
+
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return errors.New("too many redirects")
+	}
+	if req.URL.Scheme != "https" || !allowedHosts[req.URL.Hostname()] {
+		return fmt.Errorf("refusing to follow a redirect to %s", req.URL.Host)
+	}
+	return nil
+}
+
+var client = &http.Client{Timeout: 30 * time.Second, CheckRedirect: checkRedirect}
+
+// SignedMessage is what a release signature covers.
+func SignedMessage(sums []byte) []byte {
+	return append([]byte("tailconnect-release-v1\n"), sums...)
+}
+
+// VerifySignature checks a base64 ed25519 signature over sums against any of
+// the given base64 public keys.
+func VerifySignature(pubs []string, sums, sig []byte) error {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(sig)))
+	if err != nil || len(raw) != ed25519.SignatureSize {
+		return errors.New("malformed release signature")
+	}
+	msg := SignedMessage(sums)
+	for _, p := range pubs {
+		k, err := base64.StdEncoding.DecodeString(p)
+		if err != nil || len(k) != ed25519.PublicKeySize {
+			continue
+		}
+		if ed25519.Verify(ed25519.PublicKey(k), msg, raw) {
+			return nil
+		}
+	}
+	return errors.New("release signature is not valid")
+}
 
 // Latest returns the newest non-draft release (pre-releases included while
 // the project is in preview).
@@ -73,6 +128,9 @@ func Latest(ctx context.Context) (*Release, error) {
 		if r.Draft {
 			continue
 		}
+		if !Valid(r.Tag) || !semverRe.MatchString(r.Tag) || len(r.Tag) > 64 {
+			continue // e.g. "nightly": never let a stray tag block updates
+		}
 		rel := &Release{Version: strings.TrimPrefix(r.Tag, "v"), URL: r.HTMLURL, Notes: r.Body, Assets: map[string]string{}}
 		for _, a := range r.Assets {
 			rel.Assets[a.Name] = a.URL
@@ -87,7 +145,7 @@ func Latest(ctx context.Context) (*Release, error) {
 	return best, nil
 }
 
-var semverRe = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?`)
+var semverRe = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$`)
 
 type ver struct {
 	n   [3]int
@@ -133,7 +191,35 @@ func Newer(a, b string) bool {
 	case vb.pre == "":
 		return false
 	}
-	return va.pre > vb.pre
+	return comparePre(va.pre, vb.pre) > 0
+}
+
+// comparePre compares pre-release labels per semver: dot-separated parts,
+// numeric parts compared as numbers (rc.10 > rc.9).
+func comparePre(a, b string) int {
+	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(pa) && i < len(pb); i++ {
+		na, ea := strconv.Atoi(pa[i])
+		nb, eb := strconv.Atoi(pb[i])
+		switch {
+		case ea == nil && eb == nil:
+			if na != nb {
+				if na > nb {
+					return 1
+				}
+				return -1
+			}
+		case ea == nil:
+			return -1 // numeric < alphanumeric
+		case eb == nil:
+			return 1
+		default:
+			if c := strings.Compare(pa[i], pb[i]); c != 0 {
+				return c
+			}
+		}
+	}
+	return len(pa) - len(pb)
 }
 
 // AppBundle returns the .app bundle containing exe (macOS).
@@ -172,13 +258,12 @@ func writable(dir string) bool {
 	return true
 }
 
+// asset returns the release asset with exactly the expected name for this
+// version (prevents replaying another release's signed files under a new tag).
 func asset(r *Release, suffix string) (name, url string, ok bool) {
-	for n, u := range r.Assets {
-		if strings.HasSuffix(n, suffix) {
-			return n, u, true
-		}
-	}
-	return "", "", false
+	name = "TailConnect-" + r.Version + suffix
+	url, ok = r.Assets[name]
+	return name, url, ok
 }
 
 func macAsset(r *Release) (string, string, bool) { return asset(r, "-macos.dmg") }
@@ -191,15 +276,29 @@ func downloadVerified(ctx context.Context, rel *Release, name, url, dir string) 
 	if err != nil {
 		return "", err
 	}
-	su, ok := rel.Assets["SHA256SUMS"]
-	if !ok {
-		return "", errors.New("the release has no checksums; download it manually")
+	su, ok1 := rel.Assets["SHA256SUMS"]
+	ss, ok2 := rel.Assets["SHA256SUMS.sig"]
+	if !ok1 || !ok2 {
+		return "", errors.New("the release isn't signed; download it manually")
 	}
 	sp := filepath.Join(dir, "SHA256SUMS")
 	if _, err := download(ctx, su, sp); err != nil {
 		return "", err
 	}
-	b, _ := os.ReadFile(sp)
+	if _, err := download(ctx, ss, sp+".sig"); err != nil {
+		return "", err
+	}
+	b, err := os.ReadFile(sp)
+	if err != nil {
+		return "", err
+	}
+	sig, err := os.ReadFile(sp + ".sig")
+	if err != nil {
+		return "", err
+	}
+	if err := VerifySignature(ReleaseKeys, b, sig); err != nil {
+		return "", fmt.Errorf("refusing update: %w", err)
+	}
 	want, ok := expectedSum(string(b), name)
 	if !ok || want != sum {
 		return "", errors.New("downloaded update failed its checksum")
@@ -243,7 +342,9 @@ func installWindows(ctx context.Context, rel *Release, exe string) error {
 		os.RemoveAll(dir)
 		return err
 	}
-	cmd := exec.Command(setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS")
+	// !startup: an update must not turn "start at login" back on.
+	cmd := exec.Command(setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS",
+		"/RESTARTAPPLICATIONS", "/MERGETASKS=!startup")
 	return cmd.Start()
 }
 
@@ -253,7 +354,7 @@ func download(ctx context.Context, url, dst string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("User-Agent", "TailConnect-updater")
-	resp, err := (&http.Client{Timeout: 15 * time.Minute}).Do(req)
+	resp, err := (&http.Client{Timeout: 15 * time.Minute, CheckRedirect: checkRedirect}).Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -285,9 +386,13 @@ func expectedSum(sums, name string) (string, bool) {
 	return "", false
 }
 
-// teamID returns the Apple Team ID an app is signed with ("" = ad-hoc).
+// teamID returns the Apple Team ID an app is signed with ("" = ad-hoc or
+// unknown).
 func teamID(app string) string {
-	out, _ := exec.Command("codesign", "-dv", app).CombinedOutput()
+	out, err := exec.Command("codesign", "-dv", app).CombinedOutput()
+	if err != nil {
+		return ""
+	}
 	for _, l := range strings.Split(string(out), "\n") {
 		if v, ok := strings.CutPrefix(l, "TeamIdentifier="); ok && v != "not set" {
 			return strings.TrimSpace(v)
@@ -325,8 +430,21 @@ func InstallMac(ctx context.Context, rel *Release, exe string) error {
 	if out, err := exec.CommandContext(ctx, "codesign", "--verify", "--deep", "--strict", src).CombinedOutput(); err != nil {
 		return fmt.Errorf("update signature is invalid: %s", strings.TrimSpace(string(out)))
 	}
-	if want := teamID(cur); want != "" && teamID(src) != want {
-		return errors.New("update is signed by a different developer; refusing to install")
+	// Developer-ID builds pin their team: the update must carry the same
+	// Apple signature and pass Gatekeeper. (Ad-hoc builds rely on the
+	// release signature checked in downloadVerified.)
+	want := TeamID
+	if want == "" {
+		want = teamID(cur)
+	}
+	if want != "" {
+		req := `anchor apple generic and certificate leaf[subject.OU] = "` + want + `"`
+		if out, err := exec.CommandContext(ctx, "codesign", "--verify", "--deep", "--strict", "-R="+req, src).CombinedOutput(); err != nil {
+			return fmt.Errorf("update isn't signed by the expected developer: %s", strings.TrimSpace(string(out)))
+		}
+		if out, err := exec.CommandContext(ctx, "spctl", "--assess", "--type", "execute", src).CombinedOutput(); err != nil {
+			return fmt.Errorf("Gatekeeper rejected the update: %s", strings.TrimSpace(string(out)))
+		}
 	}
 	staged := cur + ".new"
 	old := cur + ".old"

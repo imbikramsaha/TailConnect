@@ -54,11 +54,11 @@ func setXDG(enabled bool, exe string) error {
 Type=Application
 Name=%s
 Comment=Connect to your devices over Tailscale
-Exec="%s" --background
+Exec=%s --background
 Icon=tailconnect
 Terminal=false
 X-GNOME-Autostart-enabled=true
-`, appName, strings.ReplaceAll(exe, `"`, `\"`))
+`, appName, desktopQuote(exe))
 	return os.WriteFile(p, []byte(content), 0o644)
 }
 
@@ -91,4 +91,14 @@ func setLaunchAgent(enabled bool, exe string) error {
 </plist>
 `
 	return os.WriteFile(p, []byte(content), 0o644)
+}
+
+// desktopQuote quotes an Exec argument per the Desktop Entry spec: inside
+// double quotes, escape " ` $ and \ with a backslash; then, because the
+// whole value is a string, backslashes are escaped again and % doubled.
+func desktopQuote(s string) string {
+	q := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "`", "\\`", `$`, `\$`).Replace(s)
+	q = `"` + q + `"`
+	q = strings.ReplaceAll(q, `\`, `\\`)
+	return strings.ReplaceAll(q, "%", "%%")
 }

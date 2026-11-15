@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -51,7 +52,8 @@ func main() {
 	fs := flag.NewFlagSet("tailconnect", flag.ExitOnError)
 	headless := fs.Bool("headless", false, "run without tray or window (servers); prints the sign-in URL")
 	background := fs.Bool("background", false, "start in the tray without opening the window")
-	authKey := fs.String("authkey", "", "Tailscale auth key for unattended sign-in (or set TS_AUTHKEY)")
+	authKey := fs.String("authkey", "", "Tailscale auth key (visible to other users in the process list; prefer --authkey-file or TS_AUTHKEY)")
+	authKeyFile := fs.String("authkey-file", "", "read the Tailscale auth key from this file")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	fs.Usage = usage
 	_ = fs.Parse(args)
@@ -61,6 +63,13 @@ func main() {
 	}
 	if !*headless && runtime.GOOS == "linux" && os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
 		*headless = true // no desktop session (e.g. over SSH): run as a background agent
+	}
+	if *authKeyFile != "" {
+		b, err := os.ReadFile(*authKeyFile)
+		if err != nil {
+			os.Exit(fatal(err))
+		}
+		*authKey = strings.TrimSpace(string(b))
 	}
 	os.Exit(runApp(*headless, *background, *authKey))
 }
@@ -81,9 +90,11 @@ Commands:
   ssh <device> [args]     open an SSH session to a device
   login | logout          sign in to / out of Tailscale
   pair list               list pending pairing requests
-  pair approve <id>       approve a pairing request
+  pair approve <id> <full|ports|stats>
+                          approve a pairing request with that access
   pair deny <id>          decline a pairing request
   proxy <device> <port>   stdio tunnel to a device port (used by ssh ProxyCommand)
+  cleanup                 remove TailConnect's SSH keys/config entries (for uninstalling)
   quit                    quit the running app
   version                 print the version
 `)
@@ -281,7 +292,15 @@ func runApp(headless, background bool, authKey string) int {
 				logs.Printf("native window: %v; using browser", err)
 			}
 		}
-		if err := launch.AppWindow(srv.LoginURL(route), profile); err != nil {
+		// Browsers take URLs on the command line, where other local users
+		// can read them: hand over a private file that redirects instead.
+		target, cleanup, err := privateLauncher(cfgDir, srv.LoginURL(route))
+		if err != nil {
+			logs.Printf("open window: %v", err)
+			return
+		}
+		time.AfterFunc(time.Minute, cleanup)
+		if err := launch.AppWindow(target, profile); err != nil {
 			logs.Printf("open window: %v", err)
 		}
 	}
@@ -445,4 +464,32 @@ func (w *windowProc) close() {
 	if w.stdin != nil {
 		w.stdin.Close()
 	}
+}
+
+// privateLauncher writes an owner-only HTML file that redirects to url and
+// returns its file:// URL, so the one-time sign-in link never appears in a
+// browser's command line.
+func privateLauncher(dir, target string) (string, func(), error) {
+	f, err := os.CreateTemp(dir, "open-*.html")
+	if err != nil {
+		return "", nil, err
+	}
+	esc := strings.NewReplacer("&", "&amp;", `"`, "&quot;", "<", "&lt;", ">", "&gt;").Replace(target)
+	_, err = fmt.Fprintf(f, `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="refresh" content="0;url=%s"><title>TailConnect</title>`, esc)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(f.Name(), 0o600)
+	}
+	if err != nil {
+		os.Remove(f.Name())
+		return "", nil, err
+	}
+	abs, _ := filepath.Abs(f.Name())
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(abs)}
+	if runtime.GOOS == "windows" {
+		u.Path = "/" + u.Path
+	}
+	return u.String(), func() { os.Remove(f.Name()) }, nil
 }

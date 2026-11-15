@@ -4,6 +4,7 @@ package forward
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strconv"
 	"sync"
@@ -39,8 +40,29 @@ func Start(preferred int, dial DialFunc, logf func(string, ...any)) (*Forward, e
 	ctx, cancel := context.WithCancel(context.Background())
 	f := &Forward{Port: port, lns: []net.Listener{ln}, dial: dial, ctx: ctx, cancel: cancel, Logf: logf}
 	// Also serve ::1 so "localhost" works whichever family the client picks.
+	// If someone else holds [::1]:port, browsers resolving localhost to ::1
+	// would talk to them: move both listeners to a fresh port instead.
 	if ln6, err := net.Listen("tcp", net.JoinHostPort("::1", strconv.Itoa(port))); err == nil {
 		f.lns = append(f.lns, ln6)
+	} else if ipv6Loopback() {
+		ln.Close()
+		cancel()
+		for i := 0; i < 20; i++ {
+			l4, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				return nil, err
+			}
+			p := l4.Addr().(*net.TCPAddr).Port
+			if l6, err := net.Listen("tcp", net.JoinHostPort("::1", strconv.Itoa(p))); err == nil {
+				ctx, cancel = context.WithCancel(context.Background())
+				f = &Forward{Port: p, lns: []net.Listener{l4, l6}, dial: dial, ctx: ctx, cancel: cancel, Logf: logf}
+				break
+			}
+			l4.Close()
+		}
+		if len(f.lns) < 2 {
+			return nil, errors.New("couldn't find a free local port")
+		}
 	}
 	for _, l := range f.lns {
 		f.wg.Add(1)
@@ -77,4 +99,14 @@ func (f *Forward) Close() {
 		l.Close()
 	}
 	f.wg.Wait()
+}
+
+// ipv6Loopback reports whether ::1 is usable on this machine.
+func ipv6Loopback() bool {
+	l, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		return false
+	}
+	l.Close()
+	return true
 }

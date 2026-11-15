@@ -643,7 +643,7 @@ func (c *Core) ReportBundle(ctx context.Context) (string, error) {
 		return "", err
 	}
 	p := filepath.Join(dir, "TailConnect-report-"+time.Now().Format("20060102-150405")+".zip")
-	f, err := os.Create(p)
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) // logs: owner only
 	if err != nil {
 		return "", err
 	}

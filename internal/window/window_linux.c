@@ -1,5 +1,6 @@
 //go:build linux && cgo && webkit
 
+#include <string.h>
 #include <gtk/gtk.h>
 #include <webkit2/webkit2.h>
 
@@ -15,17 +16,35 @@ static void on_message(WebKitUserContentManager *m, WebKitJavascriptResult *r, g
   g_free(s);
 }
 
-// Links that want a new window go to the system browser.
+static char *app_origin; // "http://127.0.0.1:PORT/"
+
+// The window only ever shows TailConnect's own page; other links (new
+// windows or navigations) go to the system browser.
 static gboolean on_decide(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPolicyDecisionType type, gpointer data) {
-  if (type != WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION) return FALSE;
+  if (type != WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION && type != WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION)
+    return FALSE;
   WebKitNavigationAction *a = webkit_navigation_policy_decision_get_navigation_action(WEBKIT_NAVIGATION_POLICY_DECISION(d));
   const char *uri = webkit_uri_request_get_uri(webkit_navigation_action_get_request(a));
-  tcOpenExternal((char *)uri);
+  if (type == WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION && app_origin && uri &&
+      g_str_has_prefix(uri, app_origin))
+    return FALSE; // our own page: allow
+  if (uri) tcOpenExternal((char *)uri);
   webkit_policy_decision_ignore(d);
   return TRUE;
 }
 
+static void set_origin(const char *url) {
+  // Keep scheme://host:port/ of the first URL as the allowed origin.
+  const char *p = strstr(url, "://");
+  if (!p) return;
+  const char *slash = strchr(p + 3, '/');
+  size_t n = slash ? (size_t)(slash - url) + 1 : strlen(url);
+  g_free(app_origin);
+  app_origin = g_strndup(url, n);
+}
+
 void tcLinuxInit(const char *url) {
+  set_origin(url);
   gtk_init(NULL, NULL);
   g_set_prgname("tailconnect");
   win = gtk_window_new(GTK_WINDOW_TOPLEVEL);

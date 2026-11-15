@@ -2,6 +2,7 @@ package launch
 
 import (
 	"os/exec"
+	"strings"
 )
 
 // Terminals lists terminals found on this machine.
@@ -18,7 +19,12 @@ func Terminals() []string {
 func Terminal(preferred string, argv []string) error {
 	if preferred == "" || preferred == "Windows Terminal" {
 		if wt, err := exec.LookPath("wt.exe"); err == nil {
-			return startVisible(wt, append([]string{"-w", "new"}, argv...)...)
+			// wt treats a bare ";" as its own command separator.
+			esc := make([]string, len(argv))
+			for i, a := range argv {
+				esc[i] = strings.ReplaceAll(a, ";", `\;`)
+			}
+			return startVisible(wt, append([]string{"-w", "new"}, esc...)...)
 		}
 	}
 	if preferred == "PowerShell" {

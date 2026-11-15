@@ -25,6 +25,40 @@ type Params struct {
 	Password   string // only used during setup; never stored
 	KnownHosts *sshkeys.KnownHosts
 	Dial       func(ctx context.Context) (net.Conn, error)
+	// ExpectHostKey, if set (SHA256 fingerprint), must match the server's
+	// key before any credentials are sent (first connection to a new host).
+	ExpectHostKey string
+}
+
+// ErrConfirmHostKey asks the user to confirm a new host's key first.
+type ErrConfirmHostKey struct{ Fingerprint string }
+
+func (e *ErrConfirmHostKey) Error() string {
+	return "confirm the host key fingerprint " + e.Fingerprint
+}
+
+// HostKeyFingerprint connects without authenticating and returns the
+// server's host key fingerprint (SHA256).
+func HostKeyFingerprint(ctx context.Context, dial func(ctx context.Context) (net.Conn, error)) (string, error) {
+	conn, err := dial(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	var fp string
+	cfg := &ssh.ClientConfig{
+		User: "tailconnect-probe",
+		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
+			fp = ssh.FingerprintSHA256(key)
+			return errors.New("probe only")
+		},
+	}
+	_, _, _, _ = ssh.NewClientConn(conn, "probe:22", cfg)
+	if fp == "" {
+		return "", errors.New("no SSH server answered")
+	}
+	return fp, nil
 }
 
 // Connect dials and authenticates.
@@ -43,9 +77,14 @@ func Connect(ctx context.Context, p Params) (*ssh.Client, error) {
 	if p.Password != "" {
 		pw := p.Password
 		auth = append(auth, ssh.Password(pw), ssh.KeyboardInteractive(
-			func(_, _ string, qs []string, _ []bool) ([]string, error) {
+			func(_, _ string, qs []string, echo []bool) ([]string, error) {
+				// Only answer password prompts; never hand the password to
+				// other questions (e.g. a one-time code or a crafted prompt).
 				ans := make([]string, len(qs))
-				for i := range ans {
+				for i, q := range qs {
+					if echo[i] || !strings.Contains(strings.ToLower(q), "password") {
+						return nil, errors.New("server asked a question other than the password")
+					}
 					ans[i] = pw
 				}
 				return ans, nil
@@ -54,7 +93,7 @@ func Connect(ctx context.Context, p Params) (*ssh.Client, error) {
 	cfg := &ssh.ClientConfig{
 		User:            p.User,
 		Auth:            auth,
-		HostKeyCallback: p.KnownHosts.Callback(p.Alias),
+		HostKeyCallback: expectKey(p.ExpectHostKey, p.KnownHosts.Callback(p.Alias)),
 		Timeout:         15 * time.Second,
 	}
 	dl := time.Now().Add(20 * time.Second)
@@ -173,4 +212,16 @@ func Keepalive(ctx context.Context, c *ssh.Client, interval time.Duration) error
 // ShellQuote single-quotes s for POSIX shells.
 func ShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+}
+
+func expectKey(want string, next ssh.HostKeyCallback) ssh.HostKeyCallback {
+	if want == "" {
+		return next
+	}
+	return func(host string, remote net.Addr, key ssh.PublicKey) error {
+		if got := ssh.FingerprintSHA256(key); got != want {
+			return fmt.Errorf("host key changed since you confirmed it (got %s)", got)
+		}
+		return next(host, remote, key)
+	}
 }

@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	"github.com/imbikramsaha/tailconnect/internal/agent"
@@ -20,7 +21,24 @@ func (hostOps) Containers(ctx context.Context) ([]agent.Container, error) {
 func (hostOps) ContainerAction(ctx context.Context, id, action string) error {
 	return hostops.ContainerAction(ctx, id, action)
 }
-func (hostOps) Wake(macs []string, bcast string) error { return hostops.Wake(macs, bcast) }
+
+// Wake only broadcasts on this machine's own networks (a peer must not be
+// able to make us send UDP to arbitrary addresses).
+func (hostOps) Wake(macs []string, bcast string) error {
+	if bcast != "" && bcast != "255.255.255.255" {
+		_, lans := hostops.LANInfo()
+		ok := false
+		for _, l := range lans {
+			if broadcastOf(l) == bcast {
+				ok = true
+			}
+		}
+		if !ok {
+			return errors.New("not a broadcast address of this device's network")
+		}
+	}
+	return hostops.Wake(macs, bcast)
+}
 func (hostOps) GetClipboard(ctx context.Context) (string, error) {
 	return hostops.GetClipboard(ctx)
 }

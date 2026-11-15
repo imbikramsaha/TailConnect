@@ -3,6 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/hmac"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,13 +15,18 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/imbikramsaha/tailconnect/internal/autostart"
 	"github.com/imbikramsaha/tailconnect/internal/core"
 	"github.com/imbikramsaha/tailconnect/internal/paths"
+	"github.com/imbikramsaha/tailconnect/internal/sshconf"
+	"github.com/imbikramsaha/tailconnect/internal/sshkeys"
 	"github.com/imbikramsaha/tailconnect/internal/store"
+	"github.com/imbikramsaha/tailconnect/internal/ui"
 	"github.com/imbikramsaha/tailconnect/internal/window"
 )
 
@@ -101,15 +109,27 @@ func (c *control) call(method, path string, body, out any) error {
 	return nil
 }
 
+// ping checks that the process on the advertised port is really our
+// TailConnect (it must prove it knows the token) before the token is sent
+// anywhere: after a crash, another local user could have taken the port.
 func (c *control) ping() bool {
-	req, _ := http.NewRequest("GET", c.base()+"/api/ping", nil)
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
+	nb := make([]byte, 16)
+	if _, err := rand.Read(nb); err != nil {
+		return false
+	}
+	nonce := hex.EncodeToString(nb)
+	resp, err := (&http.Client{Timeout: 2 * time.Second}).Get(c.base() + "/ping?n=" + nonce)
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	defer resp.Body.Close()
+	var r struct {
+		MAC string `json:"mac"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&r) != nil {
+		return false
+	}
+	return hmac.Equal([]byte(r.MAC), []byte(ui.PingMAC(c.Token, nonce)))
 }
 
 // connectApp returns the running app's control handle, optionally starting
@@ -151,6 +171,14 @@ func runCLI(args []string) int {
 		if err := window.Run(os.Stdin); err != nil {
 			return fatal(err)
 		}
+		return 0
+	case "cleanup":
+		// Used by uninstallers: remove paired devices' keys from
+		// ~/.ssh/authorized_keys and TailConnect's Include from ~/.ssh/config.
+		if err := cleanup(); err != nil {
+			return fatal(err)
+		}
+		fmt.Println("Removed TailConnect's SSH keys and config entries.")
 		return 0
 	case "proxy":
 		if len(rest) != 2 {
@@ -334,11 +362,21 @@ func pairCmd(c *control, rest []string) int {
 		}
 		return 0
 	}
-	if len(rest) != 2 || (rest[0] != "approve" && rest[0] != "deny") {
-		fmt.Fprintln(os.Stderr, "usage: tailconnect pair list | approve <id> | deny <id>")
-		return 2
+	usage := "usage: tailconnect pair list | approve <id> full|ports|stats | deny <id>"
+	switch {
+	case len(rest) == 3 && rest[0] == "approve":
+		switch rest[2] {
+		case "full", "ports", "stats":
+		default:
+			fmt.Fprintln(os.Stderr, usage)
+			return 2
+		}
+		return check(c.call("POST", "/api/pair-requests/"+url.PathEscape(rest[1])+"/approve", map[string]string{"access": rest[2]}, nil))
+	case len(rest) == 2 && rest[0] == "deny":
+		return check(c.call("POST", "/api/pair-requests/"+url.PathEscape(rest[1])+"/deny", struct{}{}, nil))
 	}
-	return check(c.call("POST", "/api/pair-requests/"+url.PathEscape(rest[1])+"/"+rest[0], struct{}{}, nil))
+	fmt.Fprintln(os.Stderr, usage)
+	return 2
 }
 
 // proxy tunnels stdin/stdout to a device port through the running app.
@@ -404,4 +442,19 @@ func dialProxy(c *control, device string, port int) (net.Conn, *bufio.Reader, er
 	}
 	_ = conn.SetDeadline(time.Time{})
 	return conn, br, nil
+}
+
+// cleanup undoes TailConnect's changes outside its own folders.
+func cleanup() error {
+	var errs []error
+	if ak, err := sshkeys.AuthorizedKeysPath(); err == nil {
+		errs = append(errs, sshkeys.RevokeAll(ak))
+	}
+	if d, err := paths.UserSSHDir(); err == nil {
+		if sd, err := paths.SSHDir(); err == nil {
+			errs = append(errs, sshconf.RemoveInclude(filepath.Join(d, "config"), filepath.Join(sd, "config")))
+		}
+	}
+	errs = append(errs, autostart.Set(false, ""))
+	return errors.Join(errs...)
 }

@@ -125,7 +125,10 @@ func Authorize(path, pubKey, tag, name string) error {
 		}
 		out = append(out, l)
 	}
-	out = append(out, fmt.Sprintf("%s %s:%s", pubKey, mark, sanitizeTag(name)))
+	// Paired devices reach the system SSH server only through TailConnect's
+	// tunnel, which connects from loopback: refuse the key from anywhere else
+	// (a stolen key can't be used over the LAN/internet).
+	out = append(out, fmt.Sprintf(`from="127.0.0.1,::1",no-agent-forwarding,no-X11-forwarding %s %s:%s`, pubKey, mark, sanitizeTag(name)))
 	return writeLines(path, out)
 }
 
@@ -260,4 +263,58 @@ func (k *KnownHosts) Forget(hostAlias string) error {
 		out = append(out, l)
 	}
 	return writeLines(k.path, out)
+}
+
+// Pin records key (authorized_keys format) as the only accepted host key for
+// hostAlias, replacing earlier entries. Used for TailConnect's built-in SSH,
+// whose host key is learned over the authenticated tailnet API rather than
+// trusted on first use.
+func (k *KnownHosts) Pin(hostAlias, key string) error {
+	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(key))
+	if err != nil {
+		return err
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	lines, err := readLines(k.path)
+	if err != nil {
+		return err
+	}
+	addr := knownhosts.Normalize(hostAlias)
+	want := knownhosts.Line([]string{addr}, pk)
+	out := lines[:0]
+	for _, l := range lines {
+		if f := strings.Fields(l); len(f) > 0 && f[0] == addr {
+			if l == want {
+				return nil // already pinned
+			}
+			continue
+		}
+		out = append(out, l)
+	}
+	return writeLines(k.path, append(out, want))
+}
+
+// RevokeAll removes every TailConnect-managed line from authorized_keys.
+func RevokeAll(path string) error {
+	akMu.Lock()
+	defer akMu.Unlock()
+	lines, err := readLines(path)
+	if err != nil || lines == nil {
+		return err
+	}
+	out := lines[:0]
+	changed := false
+	for _, l := range lines {
+		f := strings.Fields(l)
+		if len(f) >= 3 && strings.HasPrefix(f[len(f)-1], Marker) {
+			changed = true
+			continue
+		}
+		out = append(out, l)
+	}
+	if !changed {
+		return nil
+	}
+	return writeLines(path, out)
 }
