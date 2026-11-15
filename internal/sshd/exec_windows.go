@@ -172,6 +172,11 @@ func startConPTY(cmdline string, env []string, dir string, pr *ptyReq, ch ssh.Ch
 	si := new(windows.StartupInfoEx)
 	si.Cb = uint32(unsafe.Sizeof(*si))
 	si.ProcThreadAttributeList = attrs.List()
+	// Without this a child of a process whose standard handles are
+	// redirected (services, headless mode, tests) writes to those handles
+	// instead of the pseudo console. Null handles + STARTF_USESTDHANDLES make
+	// it use the console it's attached to.
+	si.Flags |= windows.STARTF_USESTDHANDLES
 	var pi windows.ProcessInformation
 	cl, err := windows.UTF16PtrFromString(cmdline)
 	if err != nil {
