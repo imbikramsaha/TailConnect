@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf16"
@@ -195,8 +196,10 @@ func startConPTY(cmdline string, env []string, dir string, pr *ptyReq, ch ssh.Ch
 	out := os.NewFile(uintptr(outR), "conpty-out")
 	go func() { _, _ = io.Copy(in, ch) }()
 	outDone := make(chan struct{})
+	var lastOut atomic.Int64
+	lastOut.Store(time.Now().UnixNano())
 	go func() {
-		_, _ = io.Copy(ch, out)
+		_, _ = io.Copy(&stampWriter{w: ch, last: &lastOut}, out)
 		close(outDone)
 	}()
 	var once sync.Once
@@ -223,6 +226,16 @@ func startConPTY(cmdline string, env []string, dir string, pr *ptyReq, ch ssh.Ch
 			var code uint32
 			_ = windows.GetExitCodeProcess(pi.Process, &code)
 			windows.CloseHandle(pi.Process)
+			// ConPTY may still hold output from the exited process; closing
+			// the console too early drops it. Wait until output goes quiet.
+			lastOut.Store(time.Now().UnixNano()) // quiet period starts at exit
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				if time.Since(time.Unix(0, lastOut.Load())) > 200*time.Millisecond {
+					break
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
 			go closeAll()
 			select {
 			case <-outDone:
@@ -236,6 +249,17 @@ func startConPTY(cmdline string, env []string, dir string, pr *ptyReq, ch ssh.Ch
 			go closeAll()
 		},
 	}, nil
+}
+
+// stampWriter records when output was last written.
+type stampWriter struct {
+	w    io.Writer
+	last *atomic.Int64
+}
+
+func (s *stampWriter) Write(p []byte) (int, error) {
+	s.last.Store(time.Now().UnixNano())
+	return s.w.Write(p)
 }
 
 // keepOpen stops the SFTP server from closing the channel itself, so the
