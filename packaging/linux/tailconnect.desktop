@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=TailConnect
+GenericName=Device access
+Comment=Connect to all your computers over Tailscale
+Exec=tailconnect
+Icon=tailconnect
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=ssh;tailscale;remote;vscode;
+StartupWMClass=tailconnect

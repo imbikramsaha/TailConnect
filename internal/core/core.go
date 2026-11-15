@@ -41,6 +41,8 @@ type Options struct {
 	Tailnet tailnet.Config
 	// Exe is the tailconnect binary used in ssh ProxyCommand lines.
 	Exe string
+	// AppExe starts the app at login (defaults to Exe; differs on Windows).
+	AppExe string
 	// SSHDir holds the key pair, known_hosts and generated ssh config.
 	SSHDir string
 	// AuthorizedKeys is where trusted peers' keys are installed.
@@ -186,7 +188,7 @@ func (c *Core) Start(ctx context.Context) error {
 		c.logs.Printf("ssh config: %v", err)
 	}
 	if st := c.store.Get().Settings; st.StartAtLogin && !c.opts.Headless {
-		if err := autostart.Set(true, c.opts.Exe); err != nil { // refresh path after updates
+		if err := autostart.Set(true, c.appExe()); err != nil { // refresh path after updates
 			c.logs.Printf("autostart: %v", err)
 		}
 	}
@@ -288,7 +290,7 @@ func (c *Core) UpdateSettings(fn func(*store.Settings)) error {
 	after := c.store.Get().Settings
 	var errs []error
 	if before.StartAtLogin != after.StartAtLogin && !c.opts.Headless {
-		if err := autostart.Set(after.StartAtLogin, c.opts.Exe); err != nil {
+		if err := autostart.Set(after.StartAtLogin, c.appExe()); err != nil {
 			errs = append(errs, fmt.Errorf("start at login: %w", err))
 		}
 	}
@@ -318,7 +320,11 @@ func (c *Core) UpdateSettings(fn func(*store.Settings)) error {
 // RestartRequired reports settings that only apply after restart.
 func (c *Core) RestartRequired() bool {
 	st := c.store.Get().Settings
-	return st.ControlURL != c.opts.Tailnet.ControlURL
+	mode := "embedded"
+	if c.opts.Tailnet.System != nil {
+		mode = "app"
+	}
+	return st.ControlURL != c.opts.Tailnet.ControlURL || (st.TailscaleMode != "" && st.TailscaleMode != mode)
 }
 
 func newID(prefix string) string {
@@ -442,4 +448,11 @@ func (c *Core) authorizeSSH(ctx context.Context, remoteAddr string, key ssh.Publ
 		return "", errors.New("key does not match the paired device")
 	}
 	return t.Name, nil
+}
+
+func (c *Core) appExe() string {
+	if c.opts.AppExe != "" {
+		return c.opts.AppExe
+	}
+	return c.opts.Exe
 }

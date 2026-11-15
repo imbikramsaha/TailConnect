@@ -31,7 +31,7 @@ func (c *Core) updateInfo() UpdateInfo {
 	u := c.update
 	u.Current = c.opts.Version
 	u.DevBuild = !update.Valid(c.opts.Version)
-	u.CanInstall = u.Available && update.CanInstall(c.opts.Exe)
+	u.CanInstall = u.Available && update.CanInstall(c.appExe())
 	return u
 }
 
@@ -74,7 +74,7 @@ func (c *Core) InstallUpdate(ctx context.Context, quit func()) error {
 	c.update.Error = ""
 	c.mu.Unlock()
 	c.events.Notify()
-	err := update.InstallMac(ctx, rel, c.opts.Exe)
+	err := update.Install(ctx, rel, c.appExe(), os.Getpid())
 	c.mu.Lock()
 	c.update.Installing = false
 	if err != nil {
@@ -85,11 +85,7 @@ func (c *Core) InstallUpdate(ctx context.Context, quit func()) error {
 	if err != nil {
 		return err
 	}
-	c.logs.Session.Printf("installed update %s; relaunching", rel.Version)
-	app, _ := update.AppBundle(c.opts.Exe)
-	if err := update.Relaunch(app, os.Getpid()); err != nil {
-		return err
-	}
+	c.logs.Session.Printf("installed update %s; restarting", rel.Version)
 	if quit != nil {
 		go func() {
 			time.Sleep(300 * time.Millisecond)

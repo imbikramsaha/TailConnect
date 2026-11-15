@@ -60,6 +60,9 @@ type Settings struct {
 	CheckUpdates bool `json:"checkUpdates"`
 	// Alerts watches connected devices' resources.
 	Alerts Alerts `json:"alerts"`
+	// TailscaleMode is "embedded" (TailConnect's own Tailscale node), "app"
+	// (use the Tailscale app on this computer) or "" (decide at first run).
+	TailscaleMode string `json:"tailscaleMode,omitempty"`
 }
 
 // Alerts are resource thresholds (percent / °C); 0 disables one.

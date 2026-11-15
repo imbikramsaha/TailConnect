@@ -33,7 +33,8 @@ lipo -create -output "$APP/Contents/MacOS/tailconnect" "$BUILD/tailconnect-arm64
 lipo -info "$APP/Contents/MacOS/tailconnect"
 
 echo "==> Icon"
-go run ./tools/mkicon "$BUILD/AppIcon.iconset"
+go run ./tools/mkicon "$BUILD/icons"
+mkdir -p "$BUILD/AppIcon.iconset" && cp "$BUILD"/icons/icon_*.png "$BUILD/AppIcon.iconset/"
 iconutil -c icns -o "$APP/Contents/Resources/AppIcon.icns" "$BUILD/AppIcon.iconset"
 
 echo "==> Info.plist"
@@ -54,7 +55,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <!-- Menu-bar app: no Dock icon, no app menu. -->
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSHumanReadableCopyright</key><string>TailConnect contributors.</string>
+  <key>NSHumanReadableCopyright</key><string>Copyright © 2026 TailConnect contributors. Apache License 2.0.</string>
   <key>NSAppleEventsUsageDescription</key><string>TailConnect opens Terminal or iTerm to start SSH sessions on your devices.</string>
   <key>NSLocalNetworkUsageDescription</key><string>TailConnect connects to your devices on the local network and over Tailscale.</string>
 </dict>

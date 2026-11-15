@@ -55,7 +55,7 @@ Type=Application
 Name=%s
 Comment=Connect to your devices over Tailscale
 Exec="%s" --background
-Icon=network-workgroup
+Icon=tailconnect
 Terminal=false
 X-GNOME-Autostart-enabled=true
 `, appName, strings.ReplaceAll(exe, `"`, `\"`))

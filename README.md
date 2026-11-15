@@ -4,7 +4,7 @@
 
 Think of it as NVIDIA Sync for every computer you own.
 
-> **Status:** Phase 1 (device access) — preview. macOS first; Windows and Linux are next.
+> **Status:** Phase 1 (device access) — preview for macOS, Windows and Linux.
 > Phase 2 adds browsing other devices' files directly in Finder / File Explorer.
 
 ## How it works
@@ -13,7 +13,7 @@ Think of it as NVIDIA Sync for every computer you own.
 2. **Sign in** once on each with the same account (Google, Microsoft, GitHub, Apple… via Tailscale; free).
 3. Your devices **find each other and pair automatically.** That's it.
 
-There's no Tailscale app to install — TailConnect embeds its own Tailscale node (it shows up as `tc-<name>` in your Tailscale admin console) and works alongside the Tailscale app if you already have it.
+There's no Tailscale app to install — TailConnect embeds its own Tailscale node (it shows up as `tc-<name>` in your Tailscale admin console). If the Tailscale app is already running and signed in when you first open TailConnect, it simply uses that connection instead — no second sign-in.
 
 ## Features
 
@@ -21,7 +21,8 @@ There's no Tailscale app to install — TailConnect embeds its own Tailscale nod
 |---|---|
 | **Automatic pairing** | Devices on the same Tailscale account trust each other with zero prompts. Devices from other accounts send a request you approve — both screens show the same 6-digit code so you know it's the right device. Requests survive restarts. |
 | **Access levels** | Grant each device **Full access** (terminal, editors, files), **Ports & monitor** (forwards, screen sharing, stats — no shell) or **Monitor only**, and optionally limit which ports it can reach. |
-| **Built-in SSH** | Terminals and editors work without enabling an SSH server: TailConnect serves SSH itself, only over Tailscale, only to paired devices with full access (PTYs, `scp`/`sftp`, VS Code port forwarding). macOS and Linux; Windows uses OpenSSH for now. |
+| **Built-in SSH** | Terminals and editors work without enabling an SSH server: TailConnect serves SSH itself, only over Tailscale, only to paired devices with full access (PTYs — ConPTY on Windows — `scp`/`sftp`, VS Code port forwarding). |
+| **Uses your Tailscale app** | Shares the Tailscale app's connection when you have it (faster, one entry in your admin console), or runs its own. Switch any time in Settings. |
 | **One-click apps** | Terminal, VS Code, VS Code Insiders, Cursor, Windsurf and Zed open a remote session on the device. |
 | **Running services** | TailConnect lists what's listening on a device — Jupyter, Ollama, ComfyUI, dev servers… — with one-click **Open** (forward + browser). |
 | **Custom apps & templates** | Forward any port to `localhost`, optionally starting it with a launch script. Templates for JupyterLab, Ollama, Open WebUI, ComfyUI, Stable Diffusion, code-server, TensorBoard, Streamlit, vLLM. Show each app on all or selected devices. |
@@ -56,6 +57,19 @@ The Homebrew cask also installs the `tailconnect` command; with the DMG, link it
 ```sh
 sudo ln -sf /Applications/TailConnect.app/Contents/MacOS/tailconnect /usr/local/bin/tailconnect
 ```
+
+### Windows 10/11
+
+Download `TailConnect-<version>-windows-setup.exe` from [Releases](https://github.com/imbikramsaha/TailConnect/releases) and run it — it installs for your user only (no administrator prompt), adds TailConnect to the Start menu and the `tailconnect` command to your PATH, and updates itself. A portable zip is also available. Until the builds are code-signed, SmartScreen may ask you to click **More info → Run anyway**.
+
+### Linux
+
+```sh
+sudo apt install ./tailconnect_<version>_amd64.deb     # Debian/Ubuntu
+sudo dnf install ./tailconnect-<version>.x86_64.rpm    # Fedora/RHEL
+```
+
+Packages for amd64 and arm64, plus a `.tar.gz`. The native window needs WebKitGTK 4.1 (`libwebkit2gtk-4.1-0`, installed automatically as a recommended package); without it TailConnect opens in your browser. On GNOME, the tray icon needs the *AppIndicator* extension (preinstalled on Ubuntu).
 
 ### Servers / headless Linux
 
@@ -102,6 +116,8 @@ Requires Go 1.27+ (and Xcode command-line tools on macOS).
 make test          # unit + two-node end-to-end tests (in-process Tailscale control server)
 make run           # build and run for this machine
 make macos         # dist/TailConnect.app + dist/TailConnect-<version>-macos.dmg (universal) + SHA256SUMS
+scripts/build-windows.sh <v>   # TailConnectApp.exe + tailconnect.exe, zip, and the installer (Inno Setup, on Windows)
+scripts/build-linux.sh <v>     # tar.gz, .deb, .rpm (on Linux; needs libgtk-3-dev libwebkit2gtk-4.1-dev)
 scripts/update-cask.sh <version>   # Homebrew cask for the tap repo
 ```
 
@@ -118,12 +134,12 @@ Set `SIGN_IDENTITY` (and `NOTARY_PROFILE`) to sign and notarize for distribution
 ```
 cmd/tailconnect        app entry point + CLI (+ `window`, the native window process)
 internal/core          engine: discovery, pairing & access, connections, apps, services, wake, diagnostics, alerts, updates
-internal/tailnet       embedded Tailscale node (tsnet)
+internal/tailnet       Tailscale connection: embedded node (tsnet) or the Tailscale app (local API)
 internal/agent         device-to-device API on the tailnet (:4747), checked per access level
 internal/sshd          built-in SSH server on the tailnet (:4748): PTY, exec, SFTP, local forwarding
 internal/hostops       local operations: services, processes, Docker, Wake-on-LAN, clipboard, files
 internal/ui            local control API + embedded web UI (127.0.0.1)
-internal/window        native WKWebView window (macOS)
+internal/window        native window: WKWebView (macOS), WebView2 (Windows), WebKitGTK helper (Linux)
 internal/tray          menu bar / system tray
 internal/notify        system notifications
 internal/update        GitHub Releases updater
@@ -133,8 +149,12 @@ internal/launch        terminals, editors, browser, screen sharing; internal/sys
 
 ## Roadmap
 
-- **Phase 1** — device access (this release): macOS ✅ · Windows · Linux
+- **Phase 1** — device access (this release): macOS ✅ · Windows ✅ · Linux ✅
 - **Phase 2** — other devices' folders in Finder / File Explorer / Files
-- Later — signed/notarized installers, use an existing Tailscale app when present, mobile, teams
+- Later — signed/notarized installers, mobile, teams
+
+## License
+
+TailConnect is licensed under the [Apache License 2.0](LICENSE).
 
 TailConnect is an independent project and is not affiliated with Tailscale Inc. or NVIDIA.

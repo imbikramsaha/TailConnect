@@ -1,0 +1,37 @@
+# nfpm config for .deb/.rpm; scripts/build-linux.sh sets VERSION, ARCH, BUILD.
+name: tailconnect
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: net
+priority: optional
+maintainer: TailConnect contributors <noreply@github.com>
+description: |
+  Connect to all your computers over an embedded Tailscale node: one-click
+  terminals and editors, port forwarding, screen sharing, file transfer and
+  live resource monitoring.
+vendor: TailConnect
+homepage: https://github.com/imbikramsaha/TailConnect
+license: Apache-2.0
+contents:
+  - src: ${BUILD}/tailconnect
+    dst: /usr/bin/tailconnect
+    file_info: { mode: 0755 }
+  - src: ${BUILD}/tailconnect-window
+    dst: /usr/lib/tailconnect/tailconnect-window
+    file_info: { mode: 0755 }
+  - src: packaging/linux/tailconnect.desktop
+    dst: /usr/share/applications/tailconnect.desktop
+  - src: ${BUILD}/tailconnect.png
+    dst: /usr/share/icons/hicolor/256x256/apps/tailconnect.png
+  - src: LICENSE
+    dst: /usr/share/doc/tailconnect/copyright
+overrides:
+  deb:
+    recommends:
+      - libwebkit2gtk-4.1-0
+      - libgtk-3-0
+  rpm:
+    recommends:
+      - webkit2gtk4.1
+      - gtk3

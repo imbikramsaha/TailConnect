@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -16,10 +17,13 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"tailscale.com/client/local"
 
 	"github.com/imbikramsaha/tailconnect/internal/core"
 	"github.com/imbikramsaha/tailconnect/internal/hostname"
@@ -102,7 +106,39 @@ func randomToken() string {
 	return hex.EncodeToString(b)
 }
 
+// waitForPID waits (briefly) for a previous instance to exit after a restart.
+func waitForPID() {
+	pid, err := strconv.Atoi(os.Getenv("TAILCONNECT_WAIT_PID"))
+	if err != nil || pid <= 0 {
+		return
+	}
+	os.Unsetenv("TAILCONNECT_WAIT_PID")
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if c, err := readControl(); err != nil || c.PID != pid || !c.ping() {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// relaunch starts a new instance that waits for this one to exit.
+func relaunch(quit func()) error {
+	cmd := exec.Command(appExe(), "--background")
+	cmd.Env = append(os.Environ(), "TAILCONNECT_WAIT_PID="+strconv.Itoa(os.Getpid()))
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go cmd.Process.Release()
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		quit()
+	}()
+	return nil
+}
+
 func runApp(headless, background bool, authKey string) int {
+	waitForPID()
 	if c, err := readControl(); err == nil && c.ping() {
 		if headless {
 			fmt.Fprintln(os.Stderr, "TailConnect is already running.")
@@ -153,6 +189,23 @@ func runApp(headless, background bool, authKey string) int {
 	if authKey == "" {
 		authKey = os.Getenv("TS_AUTHKEY")
 	}
+	// Use the Tailscale app if it's already running and signed in when
+	// TailConnect is first set up (no second sign-in); existing installs
+	// keep their own node, since switching changes the device's identity.
+	mode := settings.TailscaleMode
+	if mode == "" {
+		mode = tailnet.ModeEmbedded
+		if !settings.Onboarded && authKey == "" && settings.ControlURL == "" &&
+			tailnet.DetectSystem(context.Background()) != nil {
+			mode = tailnet.ModeApp
+		}
+		_ = st.Update(func(s *store.State) error { s.Settings.TailscaleMode = mode; return nil })
+		settings.TailscaleMode = mode
+	}
+	var system *local.Client
+	if mode == tailnet.ModeApp {
+		system = &local.Client{}
+	}
 	authorized, err := sshkeys.AuthorizedKeysPath()
 	if os.Getenv(paths.EnvHome) != "" {
 		authorized = filepath.Join(cfgDir, "authorized_keys") // isolated test instance
@@ -175,10 +228,12 @@ func runApp(headless, background bool, authKey string) int {
 			Hostname:   sshconf.Alias(host), // e.g. "tc-my-laptop" in the admin console
 			ControlURL: settings.ControlURL,
 			AuthKey:    authKey,
+			System:     system,
 			Logf:       logs.Verbose.Printf,
 			UserLogf:   logs.App.Printf,
 		},
-		Exe:            executable(),
+		Exe:            cliExe(),
+		AppExe:         appExe(),
 		SSHDir:         sshDir,
 		AuthorizedKeys: authorized,
 		UserSSHConfig:  userSSHConfig,
@@ -214,12 +269,12 @@ func runApp(headless, background bool, authKey string) int {
 	logs.Printf("TailConnect %s ready (control API on 127.0.0.1:%d)", version, srv.Port())
 
 	profile := filepath.Join(cfgDir, "ui-profile")
-	win := &windowProc{exe: executable(), logf: logs.Printf}
+	win := &windowProc{exe: appExe(), logf: logs.Printf}
 	showUI := func(route string) {
 		if headless {
 			return
 		}
-		if window.Supported() {
+		if _, ok := window.Command(win.exe); ok {
 			if err := win.show(srv.LoginURL(route)); err == nil {
 				return
 			} else {
@@ -231,6 +286,12 @@ func runApp(headless, background bool, authKey string) int {
 		}
 	}
 	srv.ShowUI = showUI
+	srv.Restart = func() error {
+		if headless {
+			return errors.New("restart the service to apply changes")
+		}
+		return relaunch(func() { srv.Quit() })
+	}
 	notify.OnClick(showUI)
 	defer win.close()
 
@@ -351,7 +412,11 @@ func (w *windowProc) show(url string) error {
 			w.cmd = nil
 		}
 	}
-	cmd := exec.Command(w.exe, "window")
+	argv, ok := window.Command(w.exe)
+	if !ok {
+		return window.ErrUnsupported
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		return err

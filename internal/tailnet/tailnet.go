@@ -37,8 +37,11 @@ type Config struct {
 	AuthKey    string // optional; TS_AUTHKEY is also honoured by tsnet
 	Ephemeral  bool
 	InMemory   bool // keep node state in memory (tests)
-	Logf       logger.Logf
-	UserLogf   logger.Logf
+	// System, if set, uses an already-running Tailscale (the Tailscale app /
+	// tailscaled) through its local API instead of an embedded node.
+	System   *local.Client
+	Logf     logger.Logf
+	UserLogf logger.Logf
 }
 
 // Info is a snapshot of the node's login state for the UI.
@@ -55,6 +58,8 @@ type Info struct {
 	UserID      int64  `json:"userID,omitempty"`
 	ControlURL  string `json:"controlURL,omitempty"`
 	Error       string `json:"error,omitempty"`
+	// Mode is "embedded" (TailConnect's own node) or "app" (Tailscale app).
+	Mode string `json:"mode"`
 }
 
 // Node is the embedded tailnet node.
@@ -116,6 +121,11 @@ func (n *Node) changed() {
 // Start brings the node up in the background. Login (if needed) proceeds
 // asynchronously; watch Info().AuthURL.
 func (n *Node) Start() error {
+	if n.cfg.System != nil {
+		n.lc = n.cfg.System
+		go n.watch()
+		return nil
+	}
 	if err := n.srv.Start(); err != nil {
 		return err
 	}
@@ -130,6 +140,23 @@ func (n *Node) Start() error {
 
 // Up starts the node and waits until it is Running (used with auth keys / tests).
 func (n *Node) Up(ctx context.Context) error {
+	if n.cfg.System != nil {
+		if n.lc == nil {
+			if err := n.Start(); err != nil {
+				return err
+			}
+		}
+		for {
+			if st, err := n.lc.StatusWithoutPeers(ctx); err == nil && st.BackendState == StateRunning {
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(200 * time.Millisecond):
+			}
+		}
+	}
 	if _, err := n.srv.Up(ctx); err != nil {
 		return err
 	}
@@ -206,6 +233,10 @@ func (n *Node) apply(note ipn.Notify) {
 func (n *Node) setErr(err error) {
 	n.mu.Lock()
 	n.lastErr = err.Error()
+	if n.cfg.System != nil {
+		n.lastErr = "Can't reach the Tailscale app — make sure it's running (" + err.Error() + ")"
+		n.state = StateNoState
+	}
 	n.mu.Unlock()
 	n.changed()
 }
@@ -257,6 +288,9 @@ func (n *Node) Login(ctx context.Context) (string, error) {
 
 // Logout signs the node out of the tailnet.
 func (n *Node) Logout(ctx context.Context) error {
+	if n.cfg.System != nil {
+		return errors.New("TailConnect is using the Tailscale app; sign out from the Tailscale app instead")
+	}
 	if n.lc == nil {
 		return errors.New("tailnet not started")
 	}
@@ -281,16 +315,34 @@ func (n *Node) WhoIs(ctx context.Context, remoteAddr string) (*apitype.WhoIsResp
 
 // Dial connects to addr over the tailnet.
 func (n *Node) Dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	if n.cfg.System != nil {
+		return n.dialSystem(ctx, network, addr)
+	}
 	return n.srv.Dial(ctx, network, addr)
 }
 
 // Listen listens on the node's tailnet addresses.
 func (n *Node) Listen(network, addr string) (net.Listener, error) {
+	if n.cfg.System != nil {
+		return n.listenSystem(network, addr)
+	}
 	return n.srv.Listen(network, addr)
 }
 
 // IPv4 returns this node's tailnet IPv4 address, if assigned.
 func (n *Node) IPv4() netip.Addr {
+	if n.cfg.System != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if st, err := n.lc.StatusWithoutPeers(ctx); err == nil {
+			for _, ip := range st.TailscaleIPs {
+				if ip.Is4() {
+					return ip
+				}
+			}
+		}
+		return netip.Addr{}
+	}
 	ip4, _ := n.srv.TailscaleIPs()
 	return ip4
 }
@@ -298,7 +350,7 @@ func (n *Node) IPv4() netip.Addr {
 // Info returns a UI snapshot of login state.
 func (n *Node) Info(ctx context.Context) Info {
 	n.mu.Lock()
-	inf := Info{State: n.state, AuthURL: n.authURL, Error: n.lastErr, ControlURL: n.cfg.ControlURL}
+	inf := Info{State: n.state, AuthURL: n.authURL, Error: n.lastErr, ControlURL: n.cfg.ControlURL, Mode: n.Mode()}
 	n.mu.Unlock()
 	if inf.State == "" {
 		inf.State = StateNoState
@@ -339,7 +391,18 @@ func (n *Node) Info(ctx context.Context) Info {
 // Close shuts the node down.
 func (n *Node) Close() error {
 	n.cancel()
+	if n.cfg.System != nil {
+		return nil // never touch the user's Tailscale
+	}
 	return n.srv.Close()
+}
+
+// Mode reports "app" when using the Tailscale app, else "embedded".
+func (n *Node) Mode() string {
+	if n.cfg.System != nil {
+		return ModeApp
+	}
+	return ModeEmbedded
 }
 
 func trimDot(s string) string {

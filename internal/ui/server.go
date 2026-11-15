@@ -50,6 +50,8 @@ type Server struct {
 	ShowUI func(route string)
 	// Quit asks the app to exit.
 	Quit func()
+	// Restart relaunches the app (nil = unsupported).
+	Restart func() error
 
 	port int
 	srv  *http.Server
@@ -91,6 +93,7 @@ func (s *Server) Serve(ln net.Listener) error {
 	api.HandleFunc("GET /api/events", s.eventsSSE)
 	api.HandleFunc("POST /api/show", s.show)
 	api.HandleFunc("POST /api/quit", s.quit)
+	api.HandleFunc("POST /api/restart", s.restart)
 	api.HandleFunc("POST /api/login", s.login)
 	api.HandleFunc("POST /api/logout", s.logout)
 	api.HandleFunc("POST /api/devices/ssh", s.addSSH)
@@ -786,6 +789,18 @@ func (s *Server) updateInstall(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	if err := s.Core.InstallUpdate(ctx, s.Quit); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	ok(w)
+}
+
+func (s *Server) restart(w http.ResponseWriter, r *http.Request) {
+	if s.Restart == nil {
+		writeErr(w, http.StatusNotImplemented, errors.New("restart TailConnect from the menu bar or tray"))
+		return
+	}
+	if err := s.Restart(); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	ok(w)

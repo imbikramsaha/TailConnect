@@ -121,7 +121,7 @@ func connectApp(autostart bool) (*control, error) {
 	if !autostart {
 		return nil, errors.New("TailConnect is not running — start it first")
 	}
-	cmd := exec.Command(executable(), "--background")
+	cmd := exec.Command(appExe(), "--background")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("starting TailConnect: %w", err)

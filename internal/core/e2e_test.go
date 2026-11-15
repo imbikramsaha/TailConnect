@@ -11,11 +11,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"tailscale.com/client/local"
 	"tailscale.com/net/netns"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tstest/integration"
@@ -52,6 +54,13 @@ func startControl(t *testing.T, sameUser bool) string {
 
 func newCore(t *testing.T, controlURL, name string, autoTrust bool) *Core {
 	t.Helper()
+	return newCoreWith(t, controlURL, name, autoTrust, nil)
+}
+
+// newCoreWith creates a core; system, if set, makes it use that Tailscale
+// daemon (the "Tailscale app" mode) instead of an embedded node.
+func newCoreWith(t *testing.T, controlURL, name string, autoTrust bool, system *local.Client) *Core {
+	t.Helper()
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "state.json"))
 	if err != nil {
@@ -80,6 +89,7 @@ func newCore(t *testing.T, controlURL, name string, autoTrust bool) *Core {
 		Tailnet: tailnet.Config{
 			Dir: tsDir, Hostname: name, ControlURL: controlURL, Ephemeral: true, InMemory: true,
 			UserLogf: logs.App.Printf,
+			System:   system,
 		},
 		Exe:               "tailconnect",
 		SSHDir:            filepath.Join(dir, "ssh"),
@@ -406,7 +416,11 @@ func TestBuiltinSSHServicesFilesAndAccess(t *testing.T) {
 	ln.Close()
 	webDir := t.TempDir()
 	os.WriteFile(filepath.Join(webDir, "index.html"), []byte("svc"), 0o644)
-	web := exec.Command("python3", "-m", "http.server", strconv.Itoa(port), "--bind", "127.0.0.1", "--directory", webDir)
+	py := "python3"
+	if _, err := exec.LookPath(py); err != nil {
+		py = "python"
+	}
+	web := exec.Command(py, "-m", "http.server", strconv.Itoa(port), "--bind", "127.0.0.1", "--directory", webDir)
 	if err := web.Start(); err != nil {
 		t.Skipf("python3 not available: %v", err)
 	}
@@ -437,6 +451,9 @@ func TestBuiltinSSHServicesFilesAndAccess(t *testing.T) {
 
 	// Processes + kill.
 	sleeper := exec.Command("sleep", "120")
+	if runtime.GOOS == "windows" {
+		sleeper = exec.Command("powershell", "-NoProfile", "-Command", "Start-Sleep -Seconds 120")
+	}
 	if err := sleeper.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -499,5 +516,129 @@ func TestBuiltinSSHServicesFilesAndAccess(t *testing.T) {
 	if c, err := a.DialDevice(ctx, devB.ID, port); err == nil {
 		c.Close()
 		t.Error("tunnel to a port outside the allow-list succeeded")
+	}
+}
+
+// buildTailscale builds tailscaled and the tailscale CLI from the module
+// cache (with Tailscale's own go.mod), cached across test runs.
+func buildTailscale(t *testing.T) (daemon, cli string) {
+	t.Helper()
+	modDir, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "tailscale.com").Output()
+	if err != nil {
+		t.Skipf("can't locate tailscale.com module: %v", err)
+	}
+	ver, _ := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "tailscale.com").Output()
+	dir := filepath.Join(os.TempDir(), "tailconnect-test-tailscale-"+strings.TrimSpace(string(ver)))
+	exe := ""
+	if runtime.GOOS == "windows" {
+		exe = ".exe"
+	}
+	daemon, cli = filepath.Join(dir, "tailscaled"+exe), filepath.Join(dir, "tailscale"+exe)
+	if _, err := os.Stat(cli); err == nil {
+		return daemon, cli
+	}
+	os.MkdirAll(dir, 0o755)
+	for _, pkg := range []string{"./cmd/tailscaled", "./cmd/tailscale"} {
+		out := daemon
+		if strings.HasSuffix(pkg, "/tailscale") {
+			out = cli
+		}
+		cmd := exec.Command("go", "build", "-o", out, pkg)
+		cmd.Dir = strings.TrimSpace(string(modDir))
+		cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off")
+		if b, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("building %s: %v\n%s", pkg, err, b)
+		}
+	}
+	return daemon, cli
+}
+
+// TestTailscaleAppMode runs one device through a real tailscaled in
+// userspace-networking mode (standing in for the Tailscale app) and the other
+// on an embedded node, and checks they pair and reach each other both ways.
+func TestTailscaleAppMode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("tailscaled runs as a service on Windows; covered on macOS/Linux")
+	}
+	daemon, cli := buildTailscale(t)
+	url := startControl(t, true)
+	dir := t.TempDir()
+	sock := filepath.Join(os.TempDir(), fmt.Sprintf("tc-%d.sock", time.Now().UnixNano()))
+	if runtime.GOOS == "windows" {
+		sock = fmt.Sprintf(`\\.\pipe\tailconnect-test-%d`, time.Now().UnixNano())
+	}
+	d := exec.Command(daemon, "--tun=userspace-networking", "--statedir="+dir, "--socket="+sock, "--port=0")
+	d.Env = append(os.Environ(), "TS_NO_LOGS_NO_SUPPORT=true")
+	dlog, _ := os.Create(filepath.Join(dir, "tailscaled.log"))
+	d.Stdout, d.Stderr = dlog, dlog
+	if err := d.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Process.Kill(); d.Wait(); os.Remove(sock) })
+	up := exec.Command(cli, "--socket="+sock, "up", "--login-server="+url, "--hostname=alpha-ts", "--timeout=60s")
+	var err error
+	for i := 0; i < 50; i++ { // wait for the daemon's socket
+		if out, e := up.CombinedOutput(); e == nil {
+			err = nil
+			break
+		} else {
+			err = fmt.Errorf("%v: %s", e, out)
+			time.Sleep(200 * time.Millisecond)
+			up = exec.Command(cli, "--socket="+sock, "up", "--login-server="+url, "--hostname=alpha-ts", "--timeout=60s")
+		}
+	}
+	if err != nil {
+		b, _ := os.ReadFile(filepath.Join(dir, "tailscaled.log"))
+		t.Fatalf("tailscale up: %v\n%s", err, b)
+	}
+	lc := &local.Client{Socket: sock, UseSocketOnly: true}
+
+	a := newCoreWith(t, url, "alpha", true, lc)
+	b := newCore(t, url, "bravo", true)
+	dumpOnFail = []*Core{a, b}
+	if m := a.Snapshot(context.Background()).Tailnet.Mode; m != "app" {
+		t.Fatalf("mode = %q", m)
+	}
+	waitFor(t, "app-mode and embedded devices to pair", 90*time.Second, func() bool {
+		da, ok1 := deviceNamed(a, "bravo")
+		db, ok2 := deviceNamed(b, "alpha")
+		return ok1 && ok2 && da.TrustsUs && db.TrustsUs && da.BuiltinSSH && db.BuiltinSSH
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	for _, pair := range []struct {
+		from *Core
+		to   string
+	}{{a, "bravo"}, {b, "alpha"}} {
+		d, _ := deviceNamed(pair.from, pair.to)
+		if _, err := pair.from.Stats(ctx, d.ID); err != nil {
+			t.Errorf("%s -> %s stats: %v", pair.from.Name(), pair.to, err)
+		}
+		cl, err := sshx.Connect(ctx, pair.from.sshParams(pair.from.mustDevice(t, d.ID), ""))
+		if err != nil {
+			t.Errorf("%s -> %s ssh: %v", pair.from.Name(), pair.to, err)
+			continue
+		}
+		out, err := sshx.Run(ctx, cl, "echo app-mode-ok", nil)
+		cl.Close()
+		if err != nil || strings.TrimSpace(out) != "app-mode-ok" {
+			t.Errorf("%s -> %s ssh run: %q %v", pair.from.Name(), pair.to, out, err)
+		}
+	}
+	// A local process connecting straight to the loopback listener can't be
+	// identified and must be refused.
+	resp, err := http.Get("http://127.0.0.1:4747/v1/stats")
+	if err == nil {
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("unidentified local caller got %d", resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+	// Logging out must never touch the user's Tailscale.
+	if err := a.Logout(ctx); err == nil {
+		t.Error("logout in app mode should be refused")
 	}
 }

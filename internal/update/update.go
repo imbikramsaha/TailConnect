@@ -147,6 +147,11 @@ func AppBundle(exe string) (string, bool) {
 
 // CanInstall reports whether in-place installation is supported for exe.
 func CanInstall(exe string) bool {
+	if runtime.GOOS == "windows" {
+		// Installed by our setup program (it leaves an uninstaller beside us).
+		_, err := os.Stat(filepath.Join(filepath.Dir(exe), "unins000.exe"))
+		return err == nil
+	}
 	if runtime.GOOS != "darwin" {
 		return false
 	}
@@ -167,13 +172,79 @@ func writable(dir string) bool {
 	return true
 }
 
-func macAsset(r *Release) (name, url string, ok bool) {
+func asset(r *Release, suffix string) (name, url string, ok bool) {
 	for n, u := range r.Assets {
-		if strings.HasSuffix(n, "-macos.dmg") {
+		if strings.HasSuffix(n, suffix) {
 			return n, u, true
 		}
 	}
 	return "", "", false
+}
+
+func macAsset(r *Release) (string, string, bool) { return asset(r, "-macos.dmg") }
+
+// downloadVerified downloads a release asset into dir and checks it against
+// the release's SHA256SUMS (required).
+func downloadVerified(ctx context.Context, rel *Release, name, url, dir string) (string, error) {
+	dst := filepath.Join(dir, name)
+	sum, err := download(ctx, url, dst)
+	if err != nil {
+		return "", err
+	}
+	su, ok := rel.Assets["SHA256SUMS"]
+	if !ok {
+		return "", errors.New("the release has no checksums; download it manually")
+	}
+	sp := filepath.Join(dir, "SHA256SUMS")
+	if _, err := download(ctx, su, sp); err != nil {
+		return "", err
+	}
+	b, _ := os.ReadFile(sp)
+	want, ok := expectedSum(string(b), name)
+	if !ok || want != sum {
+		return "", errors.New("downloaded update failed its checksum")
+	}
+	return dst, nil
+}
+
+// Install installs rel over the running app at exe. On success the caller
+// should quit: the new version is started for it (macOS relaunch helper,
+// Windows installer).
+func Install(ctx context.Context, rel *Release, exe string, pid int) error {
+	switch runtime.GOOS {
+	case "darwin":
+		if err := InstallMac(ctx, rel, exe); err != nil {
+			return err
+		}
+		app, _ := AppBundle(exe)
+		return Relaunch(app, pid)
+	case "windows":
+		return installWindows(ctx, rel, exe)
+	}
+	return errors.New("automatic install isn't supported here; download the update instead")
+}
+
+// installWindows runs the release's setup program silently. It closes
+// TailConnect, upgrades in place and starts it again.
+func installWindows(ctx context.Context, rel *Release, exe string) error {
+	if !CanInstall(exe) {
+		return errors.New("TailConnect wasn't installed with its setup program; download the update instead")
+	}
+	name, url, ok := asset(rel, "-windows-setup.exe")
+	if !ok {
+		return errors.New("the release has no Windows installer")
+	}
+	dir, err := os.MkdirTemp("", "tailconnect-update-")
+	if err != nil {
+		return err
+	}
+	setup, err := downloadVerified(ctx, rel, name, url, dir)
+	if err != nil {
+		os.RemoveAll(dir)
+		return err
+	}
+	cmd := exec.Command(setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS")
+	return cmd.Start()
 }
 
 func download(ctx context.Context, url, dst string) (string, error) {
@@ -241,21 +312,9 @@ func InstallMac(ctx context.Context, rel *Release, exe string) error {
 		return err
 	}
 	defer os.RemoveAll(tmp)
-	dmg := filepath.Join(tmp, name)
-	sum, err := download(ctx, url, dmg)
+	dmg, err := downloadVerified(ctx, rel, name, url, tmp)
 	if err != nil {
 		return err
-	}
-	if su, ok := rel.Assets["SHA256SUMS"]; ok {
-		sp := filepath.Join(tmp, "SHA256SUMS")
-		if _, err := download(ctx, su, sp); err != nil {
-			return err
-		}
-		b, _ := os.ReadFile(sp)
-		want, ok := expectedSum(string(b), name)
-		if !ok || want != sum {
-			return errors.New("downloaded update failed its checksum")
-		}
 	}
 	mnt := filepath.Join(tmp, "mnt")
 	if out, err := exec.CommandContext(ctx, "hdiutil", "attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", mnt, dmg).CombinedOutput(); err != nil {

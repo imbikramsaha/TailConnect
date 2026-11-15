@@ -211,7 +211,7 @@ function banners() {
     out += `<div class="banner"><div class="grow">${h(S.installWarning)}</div></div>`;
   }
   if (S.restartRequired) {
-    out += `<div class="banner info"><div class="grow">Restart TailConnect to apply your Tailscale server change.</div></div>`;
+    out += `<div class="banner info"><div class="grow">Restart TailConnect to apply your connection change.</div><button class="btn sm primary" data-act="restart">Restart now</button></div>`;
   }
   return out;
 }
@@ -607,6 +607,15 @@ function viewMonitor(d) {
 // ---------- onboarding ----------
 function viewOnboarding() {
   const tn = S.tailnet;
+  if (tn.mode === "app") {
+    return `<div class="center"><div class="hero">
+      <img src="/icon.png" alt="">
+      <h1>Waiting for the Tailscale app</h1>
+      <p>TailConnect is set to use the Tailscale app on this computer. Open Tailscale and sign in — TailConnect connects automatically.</p>
+      ${tn.error ? `<div class="alert" style="text-align:left">${h(tn.error)}</div>` : ""}
+      <p class="small faint" style="margin-top:22px"><a href="#/settings/tailscale">Use TailConnect's own connection instead</a></p>
+    </div></div>`;
+  }
   const signingIn = !!tn.authURL;
   const starting = tn.state === "NoState" || tn.state === "Starting";
   let action;
@@ -714,13 +723,19 @@ function viewSettings(tab) {
         ${tn.dnsName ? `<dt>This device</dt><dd class="mono">${h(tn.dnsName)}</dd>` : ""}
         ${tn.ipv4 ? `<dt>IP</dt><dd class="mono">${h(tn.ipv4)}</dd>` : ""}
       </dl>
-      <div style="margin-top:14px;display:flex;gap:8px">${tn.state === "Running"
+      <div style="margin-top:14px;display:flex;gap:8px">${tn.mode === "app"
+        ? `<span class="muted small">Signed in through the Tailscale app — sign out or switch accounts there.</span>`
+        : tn.state === "Running"
         ? `<button class="btn danger" data-act="logout">Sign out</button>`
         : `<button class="btn primary" data-act="login">Sign in</button>`}</div></div>
+      <h2 class="sec">Connection</h2>
+      <div class="card">${field("Use the Tailscale app on this computer",
+        "Share the Tailscale app's connection instead of TailConnect's own (faster, and this computer appears once in your admin console). Switching changes how other devices see this one, so they'll pair again. Takes effect after restart.",
+        `<select data-set="tailscaleMode"><option value="embedded" ${st.tailscaleMode !== "app" ? "selected" : ""}>Built into TailConnect</option><option value="app" ${st.tailscaleMode === "app" ? "selected" : ""}>Tailscale app</option></select>`)}</div>
       <h2 class="sec">Advanced</h2>
       <div class="card">${field("Control server", "Leave empty for Tailscale. Set a Headscale URL to self-host. Takes effect after restart.",
         `<input type="url" placeholder="https://headscale.example.com" style="width:260px" id="controlURL" value="${h(st.controlURL)}"><button class="btn" data-act="save-control">Save</button>`)}</div>
-      <p class="small muted">TailConnect runs its own Tailscale node (it appears as <code>tc-…</code> in your admin console) — you don't need the Tailscale app installed. It works alongside it if you have it.</p>`;
+      <p class="small muted">${tn.mode === "app" ? "TailConnect is using the Tailscale app's connection." : "TailConnect runs its own Tailscale node (it appears as <code>tc-…</code> in your admin console) — you don't need the Tailscale app installed."}</p>`;
   } else if (tab === "about") {
     const u = S.update || {};
     let upd;
@@ -1024,6 +1039,11 @@ const actions = {
   report: () => run("report", async () => {
     const r = await api.post("/api/report");
     toast(`Saved ${r.path.split(/[\\/]/).pop()} to Downloads — attach it to a GitHub issue. Nothing was uploaded.`);
+  }),
+  restart: () => run("restart", async () => {
+    await api.post("/api/restart");
+    app.innerHTML = `<div class="center"><div class="hero"><div class="spinner"></div><p>Restarting TailConnect…</p></div></div>`;
+    setTimeout(() => window.close(), 1500);
   }),
   "update-check": () => run("update", () => api.post("/api/update/check")),
   "update-install": () => run("update", () => api.post("/api/update/install")),
