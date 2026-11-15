@@ -1,6 +1,7 @@
 # Homebrew cask for TailConnect. Lives in the tap repo
 # github.com/imbikramsaha/homebrew-tap as Casks/tailconnect.rb, so users run:
-#   brew install --cask imbikramsaha/tap/tailconnect
+#   brew tap imbikramsaha/tap && brew trust imbikramsaha/tap
+#   brew install --cask tailconnect
 # scripts/update-cask.sh fills in version and sha256 for a release.
 cask "tailconnect" do
   version "VERSION"
@@ -18,7 +19,7 @@ cask "tailconnect" do
 
   # TailConnect updates itself from GitHub Releases.
   auto_updates true
-  depends_on macos: ">= :ventura"
+  depends_on macos: :ventura
 
   app "TailConnect.app"
   binary "#{appdir}/TailConnect.app/Contents/MacOS/tailconnect"

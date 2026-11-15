@@ -317,10 +317,10 @@ func InstallMac(ctx context.Context, rel *Release, exe string) error {
 		return err
 	}
 	mnt := filepath.Join(tmp, "mnt")
-	if out, err := exec.CommandContext(ctx, "hdiutil", "attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", mnt, dmg).CombinedOutput(); err != nil {
-		return fmt.Errorf("mounting update: %s", strings.TrimSpace(string(out)))
+	if err := attachDMG(ctx, dmg, mnt); err != nil {
+		return err
 	}
-	defer exec.Command("hdiutil", "detach", "-force", mnt).Run()
+	defer detachDMG(mnt)
 	src := filepath.Join(mnt, "TailConnect.app")
 	if out, err := exec.CommandContext(ctx, "codesign", "--verify", "--deep", "--strict", src).CombinedOutput(); err != nil {
 		return fmt.Errorf("update signature is invalid: %s", strings.TrimSpace(string(out)))
@@ -353,4 +353,28 @@ func Relaunch(app string, pid int) error {
 	script := fmt.Sprintf(`while kill -0 %d 2>/dev/null; do sleep 0.2; done; open "$1"`, pid)
 	cmd := exec.Command("/bin/sh", "-c", script, "sh", app)
 	return cmd.Start()
+}
+
+// attachDMG mounts dmg read-only at mnt. macOS 27 deprecates hdiutil attach
+// in favour of diskutil image; older systems only have hdiutil.
+func attachDMG(ctx context.Context, dmg, mnt string) error {
+	if err := os.MkdirAll(mnt, 0o700); err != nil {
+		return err
+	}
+	out, err := exec.CommandContext(ctx, "diskutil", "image", "attach", "--mountOptions", "nobrowse",
+		"--readOnly", "--mountPoint", mnt, dmg).CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	out2, err := exec.CommandContext(ctx, "hdiutil", "attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", mnt, dmg).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mounting update: %s %s", strings.TrimSpace(string(out)), strings.TrimSpace(string(out2)))
+	}
+	return nil
+}
+
+func detachDMG(mnt string) {
+	if exec.Command("diskutil", "eject", mnt).Run() != nil {
+		_ = exec.Command("hdiutil", "detach", "-force", mnt).Run()
+	}
 }

@@ -43,7 +43,9 @@ There's no Tailscale app to install — TailConnect embeds its own Tailscale nod
 ### macOS (13 Ventura or later, Apple Silicon or Intel)
 
 ```sh
-brew install --cask imbikramsaha/tap/tailconnect
+brew tap imbikramsaha/tap
+brew trust imbikramsaha/tap        # Homebrew asks you to trust third-party taps once
+brew install --cask tailconnect
 ```
 
 or download `TailConnect-<version>-macos.dmg` from [Releases](https://github.com/imbikramsaha/TailConnect/releases) and drag **TailConnect** to **Applications**. It appears in the menu bar and updates itself.
