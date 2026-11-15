@@ -28,9 +28,11 @@ TGZ="$OUT/tailconnect_${VERSION}_linux_${ARCH}.tar.gz"
 tar -C "$BUILD" -czf "$TGZ" tailconnect tailconnect-window tailconnect.png tailconnect.desktop LICENSE
 
 echo "==> deb / rpm"
-export VERSION ARCH BUILD
+# nfpm doesn't expand variables in file paths, so render the config.
+sed -e "s|\${VERSION}|$VERSION|g" -e "s|\${ARCH}|$ARCH|g" -e "s|\${BUILD}|$BUILD|g" \
+  packaging/linux/nfpm.yaml > "$BUILD/nfpm.yaml"
 for fmt in deb rpm; do
   go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.40.0 package \
-    --config packaging/linux/nfpm.yaml --packager "$fmt" --target "$OUT/"
+    --config "$BUILD/nfpm.yaml" --packager "$fmt" --target "$OUT/"
 done
 ls -la "$OUT" | grep -E "linux|\.deb|\.rpm" || true

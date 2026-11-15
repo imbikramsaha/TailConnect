@@ -46,7 +46,8 @@ if [[ -n "$ISCC" ]]; then
   echo "==> Installer"
   WBUILD=$(cd "$BUILD" && pwd -W 2>/dev/null || pwd)
   WOUT=$(cd "$OUT" && pwd -W 2>/dev/null || pwd)
-  (cd packaging/windows && "$ISCC" //Q "//DAppVersion=$VERSION" "//DBuildDir=$WBUILD" "//DOutDir=$WOUT" tailconnect.iss)
+  # Stop Git Bash from rewriting the /Q and /D options as paths.
+  (cd packaging/windows && MSYS2_ARG_CONV_EXCL='*' "$ISCC" /Q "/DAppVersion=$VERSION" "/DBuildDir=$WBUILD" "/DOutDir=$WOUT" tailconnect.iss)
 else
   echo "==> Inno Setup not found; skipping installer (build it on Windows)"
 fi
