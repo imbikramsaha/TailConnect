@@ -296,9 +296,13 @@ func SafeName(name string) (string, error) {
 		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9":
 		name = "_" + name
 	}
-	if len(name) > 200 {
-		ext := filepath.Ext(name)
-		name = name[:200-len(ext)] + ext
+	name = strings.ToValidUTF8(name, "_")
+	if r := []rune(name); len(r) > 200 {
+		ext := []rune(filepath.Ext(name))
+		if len(ext) > 16 {
+			ext = nil // not a real extension
+		}
+		name = string(r[:200-len(ext)]) + string(ext)
 	}
 	return name, nil
 }

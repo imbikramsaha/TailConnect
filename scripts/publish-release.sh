@@ -23,6 +23,12 @@ draft=$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft)
 echo "==> Downloading assets of draft $TAG to verify checksums locally"
 gh release download "$TAG" --repo "$REPO" --dir "$WORK"
 (cd "$WORK" && grep -v ' SHA256SUMS' SHA256SUMS | shasum -a 256 -c -)
+echo "==> Checking build provenance (built by this repository's CI)"
+for f in "$WORK"/TailConnect-* "$WORK"/tailconnect[-_]*; do
+  [[ "$f" == *.rb ]] && continue
+  gh attestation verify "$f" --repo "$REPO" >/dev/null || { echo "no valid provenance for $(basename "$f")" >&2; exit 1; }
+  echo "   ok $(basename "$f")"
+done
 echo
 cat "$WORK/SHA256SUMS"
 echo

@@ -27,7 +27,14 @@ Other programs or OS users on a paired machine share its Tailscale identity but 
 
 - CI builds releases as **drafts**. A maintainer verifies the checksums and signs `SHA256SUMS` with an ed25519 key kept offline (never in CI or the repository) before publishing.
 - The app checks that signature against the public key compiled into it, requires assets named for the exact version, only follows redirects to GitHub over HTTPS, and never downgrades. Developer-ID builds additionally require the same Apple team and a Gatekeeper pass.
-- GitHub Actions are pinned to commit SHAs, release builds don't use shared caches, and tag names are validated.
+- GitHub Actions are pinned to commit SHAs, release builds don't use shared caches, and tag names are validated. Only maintainers can create release tags, and published releases are immutable.
+- Every release file has a signed build-provenance attestation. To check a download came from this repository's CI:
+
+  ```sh
+  gh attestation verify TailConnect-<version>-macos.dmg --repo imbikramsaha/TailConnect
+  ```
+
+- CodeQL, `govulncheck`, Dependabot and fuzz tests (for everything that parses data from other devices) run continuously.
 
 ## Known limitations
 
