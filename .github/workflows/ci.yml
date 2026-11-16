@@ -48,7 +48,13 @@ jobs:
         run: go test -count=1 -timeout 20m ./...
       - name: Check install.sh
         if: runner.os == 'Linux'
-        run: shellcheck -s sh scripts/install.sh
+        run: |
+          shellcheck -s sh scripts/install.sh
+          # Installers run under any locale (macOS sh is bash 3.2, Windows
+          # PowerShell may decode as Latin-1): keep them pure ASCII.
+          if LC_ALL=C grep -n '[^ -~	]' scripts/install.sh scripts/install.ps1; then
+            echo "::error::install scripts must be ASCII-only"; exit 1
+          fi
       - name: Check install.ps1
         if: runner.os == 'Windows'
         shell: pwsh

@@ -3,10 +3,10 @@
 #   irm https://github.com/imbikramsaha/TailConnect/releases/latest/download/install.ps1 | iex
 #
 # Downloads the latest installer, checks its SHA-256 against the release's
-# SHA256SUMS and — when an OpenSSL 3 is available (e.g. from Git for Windows)
-# — checks SHA256SUMS against TailConnect's release signing key, then installs
+# SHA256SUMS and - when an OpenSSL 3 is available (e.g. from Git for Windows)
+# - checks SHA256SUMS against TailConnect's release signing key, then installs
 # for the current user (no administrator rights needed) and starts TailConnect.
-# Pin a version with: $env:TAILCONNECT_VERSION = "0.3.1"
+# Pin a version with: $env:TAILCONNECT_VERSION = "0.3.2"
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"   # much faster downloads in PowerShell 5.1
@@ -15,7 +15,7 @@ $ProgressPreference = "SilentlyContinue"   # much faster downloads in PowerShell
 $Repo = "imbikramsaha/TailConnect"
 # Release signing key (also compiled into the app; see SECURITY.md).
 $PubKey = "bBlRWaSOYVipG6PdclZi7adlxdc3UxN7JM+LXHjdT6w="
-# Signature over "tailconnect-release-v1`nselftest`n" — proves openssl can verify Ed25519.
+# Signature over "tailconnect-release-v1`nselftest`n" - proves openssl can verify Ed25519.
 $SelfTestSig = "ukresXeaXD3tmSFJePmj5T3Gpnns26rmxnO+v9vQUWCiUkp2tQv55faN8LUS/+/KNSIc2blwGe8UdPmFWuKwAg=="
 
 function Say($m) { Write-Host $m -ForegroundColor Cyan }

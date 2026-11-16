@@ -4,12 +4,12 @@
 #   curl -fsSL https://github.com/imbikramsaha/TailConnect/releases/latest/download/install.sh | sh
 #
 # Downloads the latest release for this computer, checks its SHA-256 against
-# the release's SHA256SUMS and — when an OpenSSL with Ed25519 support is
-# available — checks SHA256SUMS against TailConnect's release signing key,
+# the release's SHA256SUMS and - when an OpenSSL with Ed25519 support is
+# available - checks SHA256SUMS against TailConnect's release signing key,
 # then installs:
 #   macOS:  TailConnect.app in /Applications (or ~/Applications) + `tailconnect` command
 #   Linux:  the .deb (apt) or .rpm (dnf/yum/zypper) package, or a user-local install
-# Options (environment): TAILCONNECT_VERSION=0.3.1 to pin a version.
+# Options (environment): TAILCONNECT_VERSION=0.3.2 to pin a version.
 set -eu
 
 REPO="imbikramsaha/TailConnect"
@@ -75,15 +75,15 @@ verify() {
     { printf 'tailconnect-release-v1\n'; cat "$TMP/SHA256SUMS"; } > "$TMP/sums.msg"
     base64 -d < "$TMP/SHA256SUMS.sig" > "$TMP/sums.sig" 2>/dev/null || base64 -D < "$TMP/SHA256SUMS.sig" > "$TMP/sums.sig"
     "$OSSL" pkeyutl -verify -pubin -inkey "$TMP/pub.pem" -rawin -in "$TMP/sums.msg" -sigfile "$TMP/sums.sig" >/dev/null 2>&1 ||
-      die "release signature is NOT valid — refusing to install"
-    say "✓ Checksum and release signature verified"
+      die "release signature is NOT valid - refusing to install"
+    say "Checksum and release signature verified"
   else
-    say "✓ Checksum verified"
+    say "Checksum verified"
     warn "  (install OpenSSL 3 to also verify the release signature)"
   fi
 }
 
-say "Downloading TailConnect for $OS/$ARCH…"
+say "Downloading TailConnect for $OS/$ARCH..."
 fetch "$BASE/SHA256SUMS" "$TMP/SHA256SUMS"
 fetch "$BASE/SHA256SUMS.sig" "$TMP/SHA256SUMS.sig"
 
@@ -107,10 +107,10 @@ Darwin)
   for d in /usr/local/bin /opt/homebrew/bin "$HOME/.local/bin"; do
     if [ -d "$d" ] && [ -w "$d" ]; then ln -sf "$BIN" "$d/tailconnect" && LINK="$d/tailconnect" && break; fi
   done
-  say "✓ Installed $DEST/TailConnect.app"
-  [ -n "${LINK:-}" ] && say "✓ Command line: tailconnect (linked in $(dirname "$LINK"))"
+  say "Installed $DEST/TailConnect.app"
+  [ -n "${LINK:-}" ] && say "Command line: tailconnect (linked in $(dirname "$LINK"))"
   open "$DEST/TailConnect.app"
-  say "TailConnect is starting — look for its icon in the menu bar."
+  say "TailConnect is starting - look for its icon in the menu bar."
   ;;
 Linux)
   case "$ARCH" in
@@ -142,11 +142,11 @@ Linux)
     install -m 0755 "$TMP/tailconnect" "$TMP/tailconnect-window" "$HOME/.local/bin/"
     install -m 0644 "$TMP/tailconnect.png" "$HOME/.local/share/icons/hicolor/256x256/apps/"
     sed "s|^Exec=tailconnect|Exec=$HOME/.local/bin/tailconnect|" "$TMP/tailconnect.desktop" > "$HOME/.local/share/applications/tailconnect.desktop"
-    say "✓ Installed to ~/.local/bin (make sure it's on your PATH)"
+    say "Installed to ~/.local/bin (make sure it's on your PATH)"
   fi
-  say "✓ TailConnect installed. Start it from your applications menu, or run: tailconnect"
+  say "TailConnect installed. Start it from your applications menu, or run: tailconnect"
   ;;
 *)
-  die "unsupported system $OS — on Windows run: irm https://github.com/$REPO/releases/latest/download/install.ps1 | iex"
+  die "unsupported system $OS - on Windows run: irm https://github.com/$REPO/releases/latest/download/install.ps1 | iex"
   ;;
 esac

@@ -66,7 +66,7 @@ irm https://github.com/imbikramsaha/TailConnect/releases/latest/download/install
 | Homebrew (macOS) | `brew tap imbikramsaha/tap && brew trust imbikramsaha/tap && brew install --cask tailconnect` |
 | Windows portable | [TailConnect-windows-amd64.zip](https://github.com/imbikramsaha/TailConnect/releases/latest/download/TailConnect-windows-amd64.zip) |
 | Linux, any distribution (no root) | [x64 .tar.gz](https://github.com/imbikramsaha/TailConnect/releases/latest/download/tailconnect_linux_amd64.tar.gz) · [ARM64 .tar.gz](https://github.com/imbikramsaha/TailConnect/releases/latest/download/tailconnect_linux_arm64.tar.gz) — the install command falls back to this automatically |
-| A specific version | Set `TAILCONNECT_VERSION=0.3.1` before the install command, or browse [all releases](https://github.com/imbikramsaha/TailConnect/releases) |
+| A specific version | Set `TAILCONNECT_VERSION=0.3.2` before the install command, or browse [all releases](https://github.com/imbikramsaha/TailConnect/releases) |
 | Servers (headless) | `tailconnect --headless` prints a sign-in link; `--authkey-file <file>` signs in unattended |
 
 The install commands check every download against the release's SHA-256 checksums, and against TailConnect's release signature wherever OpenSSL 3 is available. Every release file also carries a signed build attestation: `gh attestation verify <file> --repo imbikramsaha/TailConnect`.
