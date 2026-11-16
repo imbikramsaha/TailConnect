@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -99,16 +100,45 @@ type asset struct {
 	Version, Name, URL, SHA256 string
 }
 
+// errRateLimited: GitHub's API refused an anonymous request (60 an hour
+// per network address; shared offices and CI hit it).
+var errRateLimited = errors.New("GitHub is limiting requests from this network right now; try again in an hour")
+
 // latest finds the RustDesk release file for this OS and CPU.
 func latest(ctx context.Context) (asset, error) {
+	a, err := latestFromAPI(ctx)
+	if !errors.Is(err, errRateLimited) || runtime.GOOS == "linux" {
+		return a, err
+	}
+	// macOS/Windows: the download's code signature is verified before it's
+	// used, so the version can come from the release page instead (not
+	// rate-limited). Linux has only the API's checksum: wait instead.
+	v, err := latestVersionFromPage(ctx)
+	if err != nil {
+		return asset{}, errRateLimited
+	}
+	name, err := assetName(v)
+	if err != nil {
+		return asset{}, err
+	}
+	return asset{Version: v, Name: name, URL: "https://github.com/rustdesk/rustdesk/releases/download/" + v + "/" + name}, nil
+}
+
+func latestFromAPI(ctx context.Context) (asset, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, releasesAPI, nil)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "TailConnect")
+	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" { // CI and power users
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return asset{}, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+		return asset{}, errRateLimited
+	}
 	if resp.StatusCode != http.StatusOK {
 		return asset{}, fmt.Errorf("GitHub: %s", resp.Status)
 	}
@@ -138,6 +168,27 @@ func latest(ctx context.Context) (asset, error) {
 		return asset{Version: rel.Tag, Name: a.Name, URL: a.URL, SHA256: strings.ToLower(sum)}, nil
 	}
 	return asset{}, fmt.Errorf("RustDesk %s has no %s download", rel.Tag, want)
+}
+
+var versionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+
+// latestVersionFromPage reads the latest version from where GitHub's
+// "latest release" page redirects (/releases/tag/<version>).
+func latestVersionFromPage(ctx context.Context) (string, error) {
+	cl := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodHead, "https://github.com/rustdesk/rustdesk/releases/latest", nil)
+	req.Header.Set("User-Agent", "TailConnect")
+	resp, err := cl.Do(req)
+	if err != nil {
+		return "", err
+	}
+	resp.Body.Close()
+	loc := resp.Header.Get("Location")
+	_, v, ok := strings.Cut(loc, "/releases/tag/")
+	if !ok || !versionRe.MatchString(v) {
+		return "", errors.New("couldn't find RustDesk's latest version")
+	}
+	return v, nil
 }
 
 // assetName is the release file for this platform.
@@ -211,7 +262,12 @@ func download(ctx context.Context, a asset, dir string) (string, error) {
 	if n > maxDownload {
 		return "", errors.New("download is unexpectedly large")
 	}
-	if got := hex.EncodeToString(h.Sum(nil)); got != a.SHA256 {
+	// No recorded checksum only happens on macOS/Windows (see latest), where
+	// install verifies RustDesk's code signature before using the file.
+	if a.SHA256 == "" && runtime.GOOS == "linux" {
+		return "", errors.New("no checksum to verify RustDesk against; not installing it")
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); a.SHA256 != "" && got != a.SHA256 {
 		return "", fmt.Errorf("checksum mismatch for %s; not installing it", a.Name)
 	}
 	return p, nil

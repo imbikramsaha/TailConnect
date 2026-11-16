@@ -17,6 +17,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # GitHub rate-limits anonymous API calls from shared runner addresses.
+  GITHUB_TOKEN: ${{ github.token }}
+
 jobs:
   setup:
     strategy:
@@ -47,7 +51,7 @@ jobs:
           uid=0; [ "$RUNNER_OS" = macOS ] && uid=$(id -u)
           printf '{"password":"TcCiTest1234567890ab","lock":true,"uid":%s}' "$uid" > spec/spec.json
           chmod 600 spec/spec.json
-          sudo ./tc rustdesk-admin "$PWD/spec/spec.json"
+          sudo GITHUB_TOKEN="$GITHUB_TOKEN" ./tc rustdesk-admin "$PWD/spec/spec.json"
           cat spec/spec.json.result; echo
           test ! -e spec/spec.json   # the password file is removed
           grep -q '"installed":true' spec/spec.json.result
@@ -58,7 +62,7 @@ jobs:
           test "$(sudo $RD --option approve-mode)" = password
           # Running again (e.g. "Set up again") keeps working on an installed RustDesk.
           printf '{"password":"TcCiTest1234567890ab","lock":false,"uid":%s}' "$uid" > spec/spec2.json && chmod 600 spec/spec2.json
-          sudo ./tc rustdesk-admin "$PWD/spec/spec2.json" && cat spec/spec2.json.result; echo
+          sudo GITHUB_TOKEN="$GITHUB_TOKEN" ./tc rustdesk-admin "$PWD/spec/spec2.json" && cat spec/spec2.json.result; echo
           test -z "$(sudo $RD --option whitelist)"
 
       - name: Elevated setup (Windows)
