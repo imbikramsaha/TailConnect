@@ -26,6 +26,7 @@ import (
 //
 //	TC_DEMO=/tmp/demo go test ./internal/ui -run TestDemo -timeout 30m
 //
+// TC_DEMO_NAMES (comma-separated) overrides the device names and count.
 // It writes login URLs to $TC_DEMO/urls.txt and runs until $TC_DEMO/stop exists.
 func TestDemo(t *testing.T) {
 	out := os.Getenv("TC_DEMO")
@@ -40,8 +41,12 @@ func TestDemo(t *testing.T) {
 	ctl.HTTPTestServer.Start()
 	defer ctl.HTTPTestServer.Close()
 
+	names := []string{"MacBook Air", "Mac mini"}
+	if v := os.Getenv("TC_DEMO_NAMES"); v != "" { // e.g. "MacBook Air" for the empty state
+		names = strings.Split(v, ",")
+	}
 	var urls []string
-	for _, name := range []string{"MacBook Air", "Mac mini"} {
+	for _, name := range names {
 		dir := t.TempDir()
 		st, _ := store.Open(filepath.Join(dir, "state.json"))
 		_ = st.Update(func(s *store.State) error {

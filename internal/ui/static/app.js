@@ -701,7 +701,7 @@ function viewSettings(tab) {
         `<select data-set="terminal"><option value="">Automatic</option>${terms.map(t => `<option ${t === st.terminal ? "selected" : ""}>${h(t)}</option>`).join("")}</select>`)}
       ${field("Theme", "", `<select data-set="theme">${["system", "light", "dark"].map(t => `<option value="${t}" ${t === st.theme ? "selected" : ""}>${t[0].toUpperCase() + t.slice(1)}</option>`).join("")}</select>`)}
       ${field("Add devices to ~/.ssh/config", `Lets any tool use <code>ssh tc-&lt;device&gt;</code>. Hosts live in <code>${h(S.self.sshConfig)}</code>.`, toggle("manageSSHConfig", st.manageSSHConfig))}
-      ${field("System SSH server port", "Where this computer's own SSH server listens, if it has one.", `<input type="number" min="1" max="65535" style="width:96px" data-set-num="localSSHPort" value="${h(st.localSSHPort)}">`)}
+      ${field("System SSH server port", "Where this computer's own SSH server listens, if it has one.", `<input type="number" min="1" max="65535" style="width:80px" data-set-num="localSSHPort" value="${h(st.localSSHPort)}">`)}
     </div>
     <h2 class="sec">Resource alerts</h2>
     <div class="card">
@@ -923,7 +923,7 @@ function appDialog(appID, preset) {
     </div>
     <label class="f"><span>Launch script (bash, optional)</span><textarea name="script" rows="4" spellcheck="false" placeholder="jupyter lab --no-browser --port=8888">${h(a.script || "")}</textarea>
       <small>Runs from your home directory on the device. <span class="mono">$TC_APP_TOKEN</span> is a fresh random secret each start — use it as the service's token or password (put <span class="mono">{token}</span> in the path below to pass it in the URL). Leave empty to only forward a port that's already in use.</small></label>
-    <label class="check"><input type="checkbox" name="openBrowser" ${a.openBrowser ? "checked" : ""}> Open in browser at <span class="mono">http://localhost:PORT/</span><input type="text" name="path" placeholder="path" style="height:28px;width:120px" value="${h(a.path || "")}"></label>
+    <label class="check"><input type="checkbox" name="openBrowser" ${a.openBrowser ? "checked" : ""}> Open in browser at <span class="mono">http://localhost:PORT/</span><input type="text" name="path" placeholder="path" value="${h(a.path || "")}"></label>
     <label class="check"><input type="checkbox" name="inTerminal" ${a.inTerminal ? "checked" : ""}> Run the script in a terminal window (stays open if it fails)</label>
     ${mine.length ? `<div class="f"><span>Show on</span><div class="seg" data-name="scope" data-value="${scoped.size ? "some" : "all"}">
       <button type="button" data-v="all" class="${scoped.size ? "" : "sel"}">All devices</button><button type="button" data-v="some" class="${scoped.size ? "sel" : ""}">Selected devices</button></div>

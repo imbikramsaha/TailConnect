@@ -5,6 +5,7 @@ package tailnet
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"sync"
@@ -98,6 +99,7 @@ func New(cfg Config) *Node {
 	if srv.UserLogf == nil {
 		srv.UserLogf = logger.Discard
 	}
+	srv.UserLogf = dedupe(srv.UserLogf)
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Node{cfg: cfg, srv: srv, state: StateNoState, ctx: ctx, cancel: cancel}
 }
@@ -437,4 +439,22 @@ func (n *Node) Ping(ctx context.Context, ip netip.Addr) (*ipnstate.PingResult, e
 		return nil, errors.New("tailnet not started")
 	}
 	return n.lc.Ping(ctx, ip, tailcfg.PingDisco)
+}
+
+// dedupe drops a message identical to the previous one. tsnet repeats
+// "To start this tsnet server … go to: <url>" every few seconds while it
+// waits for sign-in, which would otherwise flood the log.
+func dedupe(logf logger.Logf) logger.Logf {
+	var mu sync.Mutex
+	var last string
+	return func(format string, args ...any) {
+		msg := fmt.Sprintf(format, args...)
+		mu.Lock()
+		dup := msg == last
+		last = msg
+		mu.Unlock()
+		if !dup {
+			logf("%s", msg)
+		}
+	}
 }
