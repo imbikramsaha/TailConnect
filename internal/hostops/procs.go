@@ -22,6 +22,7 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 
 	"github.com/imbikramsaha/tailconnect/internal/agent"
+	"github.com/imbikramsaha/tailconnect/internal/launch"
 )
 
 const maxProcs = 40
@@ -215,15 +216,15 @@ func ParseRemoteProcs(out string) []agent.Process {
 
 // ---- Docker ----
 
-var dockerDirs = []string{"/usr/local/bin", "/opt/homebrew/bin", "/Applications/Docker.app/Contents/Resources/bin", "/usr/bin"}
-
+// dockerBin finds docker in PATH or the usual install locations. Paths
+// outside PATH are only used if no other local user could have planted
+// them (on a shared Mac, /opt/homebrew may belong to someone else).
 func dockerBin() (string, error) {
-	if p, err := exec.LookPath("docker"); err == nil {
+	if p, err := launch.LookPath("docker"); err == nil {
 		return p, nil
 	}
-	for _, d := range dockerDirs {
-		p := filepath.Join(d, "docker")
-		if _, err := os.Stat(p); err == nil {
+	for _, p := range []string{"/Applications/Docker.app/Contents/Resources/bin/docker", "/usr/bin/docker"} {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && launch.TrustedFile(p) {
 			return p, nil
 		}
 	}

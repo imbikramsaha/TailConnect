@@ -2,19 +2,39 @@
 /* TailConnect UI — a dependency-free single page talking to the local control API. */
 
 // ---------- session ----------
-// The sign-in redirect puts a session in the URL fragment (never sent to a
-// server). Keep it in per-tab storage — isolated by port, unlike cookies —
-// and send it as a header. No cookie exists for other local sites to steal.
-const SESSION = (() => {
-  const m = location.hash.match(/^#s=([0-9a-f]{64})(?:&r=([^&]*))?/);
-  if (m) {
-    try { sessionStorage.setItem("tc_session", m[1]); } catch {}
-    const r = m[2] ? decodeURIComponent(m[2]) : "/";
-    history.replaceState(null, "", "#" + (r.startsWith("/") ? r : "/"));
-    return m[1];
-  }
-  try { return sessionStorage.getItem("tc_session") || ""; } catch { return ""; }
+// A window opens with a single-use sign-in ticket in the URL fragment (never
+// sent to a server). It is removed from the address at once and exchanged
+// for a session over POST, so the session never appears in a URL (or in
+// browser history). The session is kept in per-tab storage — isolated by
+// port, unlike cookies — and sent as a header. There is no cookie at all.
+const TICKET = (() => {
+  const m = location.hash.match(/^#t=([0-9a-f]{32})(?:&r=([^&]*))?/);
+  if (!m) return "";
+  const r = m[2] ? decodeURIComponent(m[2]) : "/";
+  history.replaceState(null, "", "#" + (r.startsWith("/") ? r : "/"));
+  return m[1];
 })();
+let SESSION = (() => { try { return sessionStorage.getItem("tc_session") || ""; } catch { return ""; } })();
+async function signIn() {
+  if (!TICKET) return;
+  const previous = SESSION;
+  try {
+    const r = await fetch("/api/session", {
+      method: "POST", credentials: "omit", cache: "no-store",
+      headers: { "Content-Type": "application/json", "X-TailConnect": "1" },
+      body: JSON.stringify({ ticket: TICKET }),
+    });
+    const d = r.ok ? await r.json() : null;
+    if (d && /^[0-9a-f]{64}$/.test(d.session)) {
+      SESSION = d.session;
+      try { sessionStorage.setItem("tc_session", SESSION); } catch {}
+      // This window had a session already: revoke it rather than leave it valid.
+      if (previous && previous !== SESSION) {
+        fetch("/api/session", { method: "DELETE", credentials: "omit", headers: { "X-TailConnect": "1", "Authorization": "Bearer " + previous } }).catch(() => {});
+      }
+    }
+  } catch {}
+}
 function authHeaders(extra) {
   return Object.assign({ "X-TailConnect": "1", "Authorization": "Bearer " + SESSION }, extra || {});
 }
@@ -219,11 +239,15 @@ function accessSelect(attrs, cur) {
 function banners() {
   let out = "";
   for (const r of S.pairRequests) {
-    out += `<div class="banner">
-      <div class="grow"><b>${h(r.name)}</b> wants to pair with this device
+    // Least privilege for anyone else's device; the name shown is the one
+    // Tailscale reports for the machine, with the name it asked to use.
+    const machine = r.nodeName && r.nodeName.toLowerCase() !== r.name.toLowerCase() ? ` <span class="muted">(Tailscale: ${h(r.nodeName)})</span>` : "";
+    out += `<div class="banner${r.newKey ? " warn" : ""}">
+      <div class="grow"><b>${h(r.name)}</b>${machine} ${r.newKey ? "is already paired but presented a <b>new key</b>" : "wants to pair with this device"}
         <div class="small muted">${h(osLabel(r.os))} · ${h(r.loginName)}${r.sameUser ? " (your account)" : ""} · ${h(ago(r.created))}</div>
+        ${r.newKey ? `<div class="small" style="margin-top:4px">Approve only if you reset or reinstalled TailConnect there. Otherwise another program or user on that machine may be trying to take over its access — decline.</div>` : ""}
         <div class="small" style="margin-top:4px">Check that <b>${h(r.name)}</b> shows the code <span class="code">${h(r.code)}</span></div></div>
-      ${accessSelect(`data-pair-access="${h(r.id)}" aria-label="Access to grant"`, S.settings.ownDeviceAccess && r.sameUser ? S.settings.ownDeviceAccess : "full")}
+      ${accessSelect(`data-pair-access="${h(r.id)}" aria-label="Access to grant"`, r.sameUser && S.settings.ownDeviceAccess ? S.settings.ownDeviceAccess : "stats")}
       <button class="btn sm" data-act="pair-decide" data-id="${h(r.id)}" data-v="deny">Decline</button>
       <button class="btn sm primary" data-act="pair-decide" data-id="${h(r.id)}" data-v="approve">Approve</button>
     </div>`;
@@ -664,7 +688,8 @@ function viewOnboarding() {
       <p class="small faint" style="margin-top:22px"><a href="#/settings/tailscale">Use TailConnect's own connection instead</a></p>
     </div></div>`;
   }
-  const signingIn = !!tn.authURL;
+  // Only an http(s) link from the control server is shown as a sign-in link.
+  const signingIn = !!tn.authURL && /^https?:\/\//i.test(tn.authURL);
   const starting = tn.state === "NoState" || tn.state === "Starting";
   let action;
   if (signingIn) {
@@ -1139,9 +1164,18 @@ document.addEventListener("click", e => {
 }, true);
 
 // Drag & drop files onto a device's transfer card.
+// Nothing dropped outside the transfer card may navigate the window (to a
+// file:// page or a dragged link); only text into a text field is allowed.
+function blockDrop(e) {
+  const files = e.dataTransfer && [...e.dataTransfer.types].includes("Files");
+  if (files || !(e.target.closest && e.target.closest("input, textarea"))) {
+    e.preventDefault();
+    if (e.type === "dragover") e.dataTransfer.dropEffect = "none";
+  }
+}
 document.addEventListener("dragover", e => {
-  const z = e.target.closest("[data-drop]");
-  if (!z) return;
+  const z = e.target.closest && e.target.closest("[data-drop]");
+  if (!z) return blockDrop(e);
   e.preventDefault();
   z.classList.add("drop-hover");
 });
@@ -1150,8 +1184,8 @@ document.addEventListener("dragleave", e => {
   if (z && !z.contains(e.relatedTarget)) z.classList.remove("drop-hover");
 });
 document.addEventListener("drop", e => {
-  const z = e.target.closest("[data-drop]");
-  if (!z) return;
+  const z = e.target.closest && e.target.closest("[data-drop]");
+  if (!z) return blockDrop(e);
   e.preventDefault();
   z.classList.remove("drop-hover");
   if (e.dataTransfer.files.length) sendFiles(z.dataset.drop, [...e.dataTransfer.files]);
@@ -1247,6 +1281,8 @@ async function connectEvents() {
   setTimeout(connectEvents, 2000);
 }
 
-if (SESSION) refresh().then(connectEvents);
-else signedOut();
-setInterval(refresh, 15000); // relative times, safety net
+signIn().then(() => {
+  if (SESSION) refresh().then(connectEvents);
+  else signedOut();
+});
+setInterval(() => { if (SESSION) refresh(); }, 15000); // relative times, safety net

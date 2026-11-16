@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -115,16 +116,17 @@ func (c *Core) Hello(_ agent.Caller, access string) agent.Hello {
 	st := c.store.Get().Settings
 	port := st.LocalSSHPort
 	h := agent.Hello{
-		App:      agent.AppID,
-		Version:  c.opts.Version,
-		Protocol: agent.ProtocolVersion,
-		Name:     c.selfName,
-		OS:       runtime.GOOS,
-		Arch:     runtime.GOARCH,
-		SSH:      netx.PortOpen(port),
-		SSHPort:  port,
-		Trusted:  access != "",
-		Access:   access,
+		App:       agent.AppID,
+		Version:   c.opts.Version,
+		Protocol:  agent.ProtocolVersion,
+		Name:      c.selfName,
+		OS:        runtime.GOOS,
+		Arch:      runtime.GOARCH,
+		SSH:       netx.PortOpen(port),
+		SSHPort:   port,
+		Trusted:   access != "",
+		Access:    access,
+		DeviceKey: c.id.PublicLine,
 	}
 	// Reveal only what the caller's access level needs.
 	if store.AccessRank(access) >= store.AccessRank(store.AccessPorts) && access != "" {
@@ -216,6 +218,9 @@ func (c *Core) HandlePair(_ context.Context, cl agent.Caller, req agent.PairRequ
 	if err != nil {
 		return agent.PairResponse{Status: agent.PairDenied, Message: err.Error()}
 	}
+	if !strings.HasPrefix(pub, "ssh-ed25519 ") { // TailConnect device keys are always ed25519
+		return agent.PairResponse{Status: agent.PairDenied, Message: "only ed25519 device keys are accepted"}
+	}
 	req.Name = SafeName(req.Name)
 	if req.Name == "" {
 		req.Name = SafeName(cl.Name)
@@ -225,34 +230,31 @@ func (c *Core) HandlePair(_ context.Context, cl agent.Caller, req agent.PairRequ
 	c.mu.Lock()
 	selfUser, selfNode := c.selfUserID, c.selfNodeID
 	c.mu.Unlock()
-	code := PairCode(cl.NodeID, pub, selfNode)
+	// The confirmation code includes a fresh random value from this device,
+	// so a requester can't search for a key whose code matches someone
+	// else's request.
+	code := PairCode(cl.NodeID, pub, selfNode+"|"+randomHex(16))
 	auto := st.Settings.AutoTrustOwnDevices && !cl.Tagged && cl.UserID != 0 && cl.UserID == selfUser &&
 		!slices.Contains(st.Ignored, cl.NodeID)
 	t, trusted := st.Trust(cl.NodeID)
 	switch {
 	case trusted && t.PublicKey == pub:
 		// Re-pairing with the same key: nothing changes.
-		return c.approvedResponse(cl, code)
-	case trusted && !auto:
-		// A different key for a device paired by approval: another process
-		// on that machine could be trying to take over its access. Ask again.
+		return c.approvedResponse(cl, "")
+	case trusted:
+		// A different key for a paired device — even one on your account.
+		// Every program and OS user on that machine shares its Tailscale
+		// identity, so this could be one of them trying to take over the
+		// device's access. The paired key stays trusted; ask about the new one.
 		c.logs.Session.Printf("%q presented a new key; approval required", req.Name)
 	case auto:
 		level := st.Settings.OwnDeviceAccess
-		if trusted {
-			level = t.Level()
-		}
-		if err := c.trust(cl, req.Name, pub, level, t.Ports); err != nil {
+		if err := c.trust(cl, req.Name, pub, level, nil, true); err != nil {
 			return agent.PairResponse{Status: agent.PairDenied, Message: err.Error()}
 		}
-		if trusted {
-			c.logs.Session.Printf("own device %q (%s) re-paired with a new key", req.Name, cl.LoginName)
-			c.notify("Key changed for "+req.Name, "It was re-paired automatically because it's on your account. Review it in Settings → Devices & access.", "#/settings/access")
-		} else {
-			c.logs.Session.Printf("auto-trusted own device %q (%s) with %s access", req.Name, cl.LoginName, level)
-			c.notify(req.Name+" can now reach this computer", "Paired automatically because it's on your Tailscale account ("+accessWord(level)+"). Review in Settings → Devices & access.", "#/settings/access")
-		}
-		return c.approvedResponse(cl, code)
+		c.logs.Session.Printf("auto-trusted own device %q (%s) with %s access", req.Name, cl.LoginName, level)
+		c.notify(req.Name+" can now reach this computer", "Paired automatically because it's on your Tailscale account ("+accessWord(level)+"). Review in Settings → Devices & access.", "#/settings/access")
+		return c.approvedResponse(cl, "")
 	}
 	// Recently declined: don't re-ask (and re-notify) for an hour.
 	for _, p := range st.Pending {
@@ -264,16 +266,33 @@ func (c *Core) HandlePair(_ context.Context, cl agent.Caller, req agent.PairRequ
 	var id string
 	isNew := false
 	err = c.store.Update(func(s *store.State) error {
-		for i := range s.Pending {
-			if s.Pending[i].NodeID == cl.NodeID && s.Pending[i].Status == agent.PairPending {
-				pp := &s.Pending[i]
-				id = pp.ID
-				if pp.Name == req.Name && pp.PublicKey == pub && pp.OS == req.OS && pp.Code == code {
+		open := 0
+		for i := 0; i < len(s.Pending); i++ {
+			pp := &s.Pending[i]
+			if pp.Status != agent.PairPending {
+				continue
+			}
+			if pp.NodeID != cl.NodeID {
+				open++
+				continue
+			}
+			if pp.PublicKey == pub {
+				// The same request again (the requester polls by re-sending).
+				id, code = pp.ID, pp.Code
+				if pp.Name == req.Name && pp.OS == req.OS {
 					return errUnchanged
 				}
-				pp.Name, pp.PublicKey, pp.OS, pp.Code = req.Name, pub, req.OS, code
+				pp.Name, pp.OS = req.Name, req.OS
 				return nil
 			}
+			// A different key from the same device: withdraw the old request
+			// rather than swap the key under it, so an approval can only ever
+			// apply to the key (and code) the user was shown.
+			s.Pending = slices.Delete(s.Pending, i, i+1)
+			i--
+		}
+		if open >= maxPendingRequests {
+			return errTooManyRequests
 		}
 		id, isNew = newID("pr-"), true
 		s.Pending = append(s.Pending, store.Pending{
@@ -321,13 +340,32 @@ func (c *Core) PairStatus(cl agent.Caller, id string) agent.PairResponse {
 	return agent.PairResponse{Status: agent.PairDenied, Message: "request expired"}
 }
 
-// Unpair handles a peer telling us to forget it.
+// Unpair handles a peer telling us to forget it. If its access here was
+// restricted (lower than new own devices get, or limited to some ports),
+// it must be approved to come back — otherwise unpairing and auto-pairing
+// again would lift the restriction.
 func (c *Core) Unpair(cl agent.Caller) error {
 	c.logs.Session.Printf("device %q unpaired itself", cl.Name)
+	st := c.store.Get()
+	if t, ok := st.Trust(cl.NodeID); ok && (len(t.Ports) > 0 || store.AccessRank(t.Level()) < store.AccessRank(st.Settings.OwnDeviceAccess)) {
+		_ = c.store.Update(func(st *store.State) error {
+			if !slices.Contains(st.Ignored, cl.NodeID) {
+				st.Ignored = append(st.Ignored, cl.NodeID)
+			}
+			return nil
+		})
+	}
 	return c.untrust(cl.NodeID)
 }
 
-var errUnchanged = errors.New("unchanged")
+var (
+	errUnchanged       = errors.New("unchanged")
+	errTooManyRequests = errors.New("too many pairing requests are waiting; approve or decline some first")
+	errRevoked         = errors.New("access to this device was revoked")
+)
+
+// maxPendingRequests caps requests awaiting a decision (each may notify).
+const maxPendingRequests = 32
 
 func accessWord(level string) string {
 	switch level {
@@ -358,17 +396,25 @@ func (c *Core) PendingKey(nodeID, id string) string {
 
 // ---- trust management ----
 
-func (c *Core) trust(cl agent.Caller, name, pub, level string, ports []int) error {
+// trust records cl's key with an access level. auto marks automatic
+// (own-device) trust, which a revocation made meanwhile must win over.
+func (c *Core) trust(cl agent.Caller, name, pub, level string, ports []int, auto bool) error {
 	if name == "" {
 		name = cl.Name
 	}
 	if !store.ValidAccess(level) {
 		level = store.AccessFull
 	}
+	if auto && slices.Contains(c.store.Get().Ignored, cl.NodeID) {
+		return errRevoked
+	}
 	if err := c.syncAuthorizedKey(cl.NodeID, name, pub, level); err != nil {
 		return err
 	}
 	err := c.store.Update(func(st *store.State) error {
+		if auto && slices.Contains(st.Ignored, cl.NodeID) {
+			return errRevoked // revoked while the key was being installed
+		}
 		st.Trusted = slices.DeleteFunc(st.Trusted, func(t store.TrustedPeer) bool { return t.NodeID == cl.NodeID })
 		st.Trusted = append(st.Trusted, store.TrustedPeer{
 			NodeID: cl.NodeID, Name: name, LoginName: cl.LoginName, PublicKey: pub, TrustedAt: time.Now(),
@@ -376,6 +422,14 @@ func (c *Core) trust(cl agent.Caller, name, pub, level string, ports []int) erro
 		})
 		return nil
 	})
+	if errors.Is(err, errRevoked) {
+		_ = sshkeys.Revoke(c.opts.AuthorizedKeys, cl.NodeID)
+	}
+	// Sessions and tunnels opened with a previous key or level end now.
+	c.dropSSHSessions(cl.NodeID)
+	if c.agentSrv != nil {
+		c.agentSrv.CloseNode(cl.NodeID)
+	}
 	c.events.Notify()
 	return err
 }
@@ -480,7 +534,13 @@ func (c *Core) ApprovePair(id string, approve bool, level string) error {
 		st.Ignored = slices.DeleteFunc(st.Ignored, func(s string) bool { return s == p.NodeID })
 		return nil
 	})
-	if err := c.trust(cl, p.Name, p.PublicKey, level, nil); err != nil {
+	// A new key for a device already paired keeps its port limit.
+	var ports []int
+	cur := c.store.Get()
+	if t, ok := cur.Trust(p.NodeID); ok {
+		ports = t.Ports
+	}
+	if err := c.trust(cl, p.Name, p.PublicKey, level, ports, false); err != nil {
 		return err
 	}
 	if err := setStatus(agent.PairApproved); err != nil {
@@ -611,7 +671,7 @@ func (c *Core) runPair(nodeID string, auto bool) {
 	}
 	// Learn the SSH server, home dir and wake info now that we're trusted.
 	hctx, hcancel := context.WithTimeout(c.ctx, 8*time.Second)
-	if h, err := c.agentCli.Hello(hctx, p.IP); err == nil && h.Trusted {
+	if h, err := c.verifiedHello(hctx, nodeID, p.IP); err == nil && h.Trusted {
 		if d, ok := c.device("p-" + nodeID); ok {
 			c.applyHello(d, h)
 		}

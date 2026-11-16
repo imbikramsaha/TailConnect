@@ -2,6 +2,7 @@ package agent
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -24,7 +25,47 @@ const (
 	hdrNonce = "X-TC-Nonce"
 	hdrSig   = "X-TC-Sig"
 	maxSkew  = 5 * time.Minute
+
+	// hdrRespSig signs a Hello answer with the answering device's key,
+	// bound to the request's nonce. It lets a peer tell TailConnect from
+	// another program or OS user answering on the same machine's ports
+	// (possible with the Tailscale app while TailConnect isn't running).
+	hdrRespSig = "X-TC-Resp-Sig"
 )
+
+func responseBytes(nonce string, body []byte) []byte {
+	sum := sha256.Sum256(body)
+	return []byte("tailconnect-resp-v1\n" + nonce + "\n" + hex.EncodeToString(sum[:]) + "\n")
+}
+
+// signResponse signs body as the answer to the request carrying nonce.
+func signResponse(signer ssh.Signer, nonce string, body []byte) (string, error) {
+	sig, err := signer.Sign(rand.Reader, responseBytes(nonce, body))
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(ssh.Marshal(sig)), nil
+}
+
+// verifyResponse checks a response signature against key (authorized_keys).
+func verifyResponse(key, nonce string, body []byte, sigB64 string) bool {
+	if key == "" || sigB64 == "" || len(nonce) != 32 {
+		return false
+	}
+	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(key))
+	if err != nil {
+		return false
+	}
+	raw, err := base64.StdEncoding.DecodeString(sigB64)
+	if err != nil {
+		return false
+	}
+	var sig ssh.Signature
+	if ssh.Unmarshal(raw, &sig) != nil {
+		return false
+	}
+	return pk.Verify(responseBytes(nonce, body), &sig) == nil
+}
 
 func signedBytes(method, uri, host, ts, nonce string) []byte {
 	return []byte("tailconnect-req-v2\n" + method + "\n" + uri + "\n" + host + "\n" + ts + "\n" + nonce + "\n")
@@ -51,11 +92,18 @@ func signRequest(req *http.Request, signer ssh.Signer) error {
 	return nil
 }
 
-// nonceCache rejects replayed signatures.
+// nonceCache rejects replayed signatures. A nonce only needs remembering
+// while its timestamp is acceptable (2 x maxSkew); older entries are pruned
+// at most every 30 seconds, and the cache is capped — past the cap new
+// requests are refused rather than old nonces forgotten, which would allow
+// replays. Per-device rate limits keep honest traffic far below it.
 type nonceCache struct {
-	mu   sync.Mutex
-	seen map[string]time.Time
+	mu     sync.Mutex
+	seen   map[string]time.Time
+	pruned time.Time
 }
+
+const maxNonces = 200_000
 
 func (n *nonceCache) fresh(nonce string) bool {
 	n.mu.Lock()
@@ -64,14 +112,15 @@ func (n *nonceCache) fresh(nonce string) bool {
 		n.seen = map[string]time.Time{}
 	}
 	now := time.Now()
-	if len(n.seen) > 4096 {
+	if now.Sub(n.pruned) > 30*time.Second {
 		for k, t := range n.seen {
 			if now.Sub(t) > 2*maxSkew {
 				delete(n.seen, k)
 			}
 		}
+		n.pruned = now
 	}
-	if _, dup := n.seen[nonce]; dup {
+	if _, dup := n.seen[nonce]; dup || len(n.seen) >= maxNonces {
 		return false
 	}
 	n.seen[nonce] = now

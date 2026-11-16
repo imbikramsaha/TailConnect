@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/user"
@@ -95,6 +96,7 @@ type Core struct {
 	outgoing   map[string]*outgoing  // our pairing requests, by node ID
 	selfUserID int64
 	selfNodeID string
+	selfIPs    []netip.Addr // this device's tailnet addresses
 
 	sshMu   sync.Mutex
 	sshSrv  *sshd.Server
@@ -181,7 +183,7 @@ func (c *Core) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("agent listener: %w", err)
 	}
-	c.agentSrv = &agent.Server{ID: c, Host: c, Ops: hostOps{inbox: c.opts.InboxDir}, Logf: c.logs.Printf}
+	c.agentSrv = &agent.Server{ID: c, Host: c, Ops: hostOps{inbox: c.opts.InboxDir}, Logf: c.logs.Printf, SelfIPs: c.SelfIPs, Signer: c.id.Signer}
 	go func() {
 		if err := c.agentSrv.Serve(ln); err != nil {
 			c.logs.Printf("agent server: %v", err)
@@ -340,9 +342,21 @@ func randomToken() string {
 }
 
 func newID(prefix string) string {
-	b := make([]byte, 5)
+	return prefix + randomHex(5)
+}
+
+// SelfIPs returns this device's tailnet addresses (empty until known).
+func (c *Core) SelfIPs() []netip.Addr {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.selfIPs)
+}
+
+// randomHex returns n random bytes, hex-encoded.
+func randomHex(n int) string {
+	b := make([]byte, n)
 	_, _ = rand.Read(b)
-	return prefix + hex.EncodeToString(b)
+	return hex.EncodeToString(b)
 }
 
 // sshClientOK reports whether an ssh client is still alive.
@@ -392,6 +406,13 @@ func (c *Core) syncBuiltinSSH() error {
 	if !want {
 		c.stopBuiltinSSH()
 		return nil
+	}
+	// Running as root/administrator (e.g. started from an admin prompt)
+	// would hand paired devices administrator shells. Refuse unless the
+	// owner explicitly wants that (a server run as root on purpose).
+	if sshd.Elevated() && os.Getenv("TAILCONNECT_ALLOW_ELEVATED_SSH") != "1" {
+		c.stopBuiltinSSH()
+		return errors.New("built-in SSH is off because TailConnect is running as root/administrator; start it as your normal user (or set TAILCONNECT_ALLOW_ELEVATED_SSH=1 to allow administrator shells)")
 	}
 	c.sshMu.Lock()
 	defer c.sshMu.Unlock()

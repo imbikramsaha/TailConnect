@@ -207,7 +207,7 @@ func TestAutoPairTunnelStatsAndRemove(t *testing.T) {
 	// in TUN mode other local users could otherwise pose as an "own device").
 	selfIP := a.Snapshot(context.Background()).Tailnet.IPv4
 	sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
-	_, err = a.agentCli.Hello(sctx, selfIP)
+	_, _, err = a.agentCli.Hello(sctx, selfIP)
 	var se *agent.StatusError
 	if !errors.As(err, &se) || se.Code != http.StatusForbidden {
 		t.Errorf("self call: want 403 from the agent, got %v", err)
@@ -225,6 +225,10 @@ func TestAutoPairTunnelStatsAndRemove(t *testing.T) {
 		d, _ := deviceNamed(a, "bravo")
 		return d.State == StateConnected
 	})
+	// Bravo's signed answers pinned its real device key on alpha.
+	if d, ok := a.device(devB.ID); !ok || d.PeerKey != b.Identity().PublicLine {
+		t.Error("bravo's device key was not pinned from its signed answers")
+	}
 
 	// A web service "on bravo" (loopback of this test process).
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -548,7 +552,7 @@ func TestBuiltinSSHServicesFilesAndAccess(t *testing.T) {
 	if !errors.As(err, &se) || se.Code != http.StatusForbidden {
 		t.Errorf("foreign-key request: want 403, got %v", err)
 	}
-	if h, err := intruder.Hello(ctx, bIP); err != nil || h.Trusted || h.User != "" || h.HostKey != "" {
+	if h, _, err := intruder.Hello(ctx, bIP); err != nil || h.Trusted || h.User != "" || h.HostKey != "" {
 		t.Errorf("foreign-key hello revealed paired details: %+v %v", h, err)
 	}
 	if _, err := agent.NewClient(a.node.Dial, nil).Stats(ctx, bIP); err == nil {

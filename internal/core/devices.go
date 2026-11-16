@@ -99,7 +99,9 @@ func (c *Core) AddSSHDevice(ctx context.Context, req AddSSHRequest) (store.Devic
 		return rollback(err)
 	}
 	err = sshx.InstallKey(ctx, cl, c.id.PublicLine, "tailconnect@"+sanitizeName(c.selfName))
-	home := sshx.HomeDir(ctx, cl)
+	// The host reports its own home directory: validate it like a peer's,
+	// since it ends up in editor command lines here.
+	home, _ := SafeHome(sshx.HomeDir(ctx, cl))
 	cl.Close()
 	if err != nil {
 		return rollback(err)

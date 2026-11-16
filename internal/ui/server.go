@@ -1,7 +1,9 @@
 // Package ui serves TailConnect's local control API and the embedded web UI
-// on 127.0.0.1. Every request must carry the per-run token (bearer header
-// for the CLI, a SameSite=Strict cookie for the UI window); mutating requests
-// also require a custom header so other origins cannot forge them.
+// on 127.0.0.1. Every API request carries a bearer header: the per-run token
+// (CLI) or a window session obtained by exchanging a single-use ticket. There
+// are deliberately no cookies (browsers share 127.0.0.1 cookies across
+// ports). Mutating requests also need a custom header, and requests from
+// other sites are refused, so other origins cannot forge them.
 package ui
 
 import (
@@ -24,6 +26,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/netutil"
 
 	"github.com/imbikramsaha/tailconnect/internal/core"
 	"github.com/imbikramsaha/tailconnect/internal/icon"
@@ -56,11 +60,14 @@ type Server struct {
 	Restart func() error
 
 	port int
-	srv  *http.Server
+
+	smu    sync.Mutex // guards srv and closed (Serve and Close race at shutdown)
+	srv    *http.Server
+	closed bool
 
 	tmu      sync.Mutex
 	tickets  map[string]time.Time // one-time window sign-in tickets
-	sessions map[string]struct{}  // UI window sessions (never the CLI token)
+	sessions map[string]time.Time // UI window sessions -> last use (never the CLI token)
 }
 
 // Listen binds the control API on loopback, preferring DefaultPort.
@@ -77,12 +84,15 @@ func (s *Server) Bind(ln net.Listener) { s.port = ln.Addr().(*net.TCPAddr).Port 
 
 // Serve serves on ln until Close.
 func (s *Server) Serve(ln net.Listener) error {
-	s.Bind(ln)
+	if s.port == 0 { // callers normally Bind first, so LoginURL works at once
+		s.Bind(ln)
+	}
 	static, _ := fs.Sub(staticFS, "static")
 	files := http.FileServer(http.FS(static))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /auth", s.auth)
+	mux.HandleFunc("POST /api/session", s.newSessionHandler) // ticket -> session; the only unauthenticated API
 	mux.HandleFunc("GET /ping", s.ping)
 	mux.HandleFunc("GET /icon.png", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
@@ -132,10 +142,21 @@ func (s *Server) Serve(ln net.Listener) error {
 	api.HandleFunc("POST /api/report", s.report)
 	api.HandleFunc("POST /api/update/check", s.updateCheck)
 	api.HandleFunc("POST /api/update/install", s.updateInstall)
+	api.HandleFunc("DELETE /api/session", s.endSession)
 	mux.Handle("/api/", s.guard(api))
 
-	s.srv = &http.Server{Handler: s.hostCheck(mux), ReadHeaderTimeout: 10 * time.Second}
-	err := s.srv.Serve(ln)
+	srv := &http.Server{Handler: s.hostCheck(mux), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+	s.smu.Lock()
+	if s.closed {
+		s.smu.Unlock()
+		ln.Close()
+		return nil
+	}
+	s.srv = srv
+	s.smu.Unlock()
+	// Any local user can connect to loopback: cap connections so idle ones
+	// can't exhaust file descriptors and lock the owner out.
+	err := srv.Serve(netutil.LimitListener(ln, maxConns))
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
@@ -147,12 +168,16 @@ func (s *Server) Port() int { return s.port }
 
 // Close stops the server.
 func (s *Server) Close() error {
-	if s.srv == nil {
+	s.smu.Lock()
+	s.closed = true
+	srv := s.srv
+	s.smu.Unlock()
+	if srv == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	return s.srv.Shutdown(ctx)
+	return srv.Shutdown(ctx)
 }
 
 // LoginURL returns a single-use URL (valid two minutes) that signs a UI
@@ -219,10 +244,57 @@ func (s *Server) authed(r *http.Request) bool {
 	if tok != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(s.Token)) == 1 {
 		return true
 	}
+	if len(tok) != 64 {
+		return false
+	}
 	s.tmu.Lock()
-	_, ok := s.sessions[tok]
-	s.tmu.Unlock()
-	return ok && len(tok) == 64
+	defer s.tmu.Unlock()
+	last, ok := s.sessions[tok]
+	if !ok {
+		return false
+	}
+	if time.Since(last) > sessionIdle {
+		delete(s.sessions, tok)
+		return false
+	}
+	s.sessions[tok] = time.Now()
+	return true
+}
+
+const (
+	// An open window refreshes every 15 seconds, so only sessions of closed
+	// windows ever sit idle this long.
+	sessionIdle = 12 * time.Hour
+	maxSessions = 32
+	maxConns    = 128
+)
+
+// newSession creates a window session, dropping expired ones and, past
+// maxSessions, the least recently used.
+func (s *Server) newSession() string {
+	sess := randomHex(32)
+	now := time.Now()
+	s.tmu.Lock()
+	defer s.tmu.Unlock()
+	if s.sessions == nil {
+		s.sessions = map[string]time.Time{}
+	}
+	for k, t := range s.sessions {
+		if now.Sub(t) > sessionIdle {
+			delete(s.sessions, k)
+		}
+	}
+	for len(s.sessions) >= maxSessions {
+		var oldest string
+		for k, t := range s.sessions {
+			if oldest == "" || t.Before(s.sessions[oldest]) {
+				oldest = k
+			}
+		}
+		delete(s.sessions, oldest)
+	}
+	s.sessions[sess] = now
+	return sess
 }
 
 // ping lets the CLI check it's talking to the real TailConnect before it
@@ -258,12 +330,15 @@ func (s *Server) guard(next http.Handler) http.Handler {
 	})
 }
 
-// auth exchanges the one-time URL token for a session cookie.
+// auth checks a sign-in ticket and hands it to the page in the URL fragment
+// (never sent to a server or in a Referer). The page then exchanges it for a
+// session with POST /api/session, so the session itself never appears in a
+// URL — and so never in browser history or session-restore files. The ticket
+// is single-use, so a copy left in history is worthless.
 func (s *Server) auth(w http.ResponseWriter, r *http.Request) {
 	t := r.URL.Query().Get("t")
 	s.tmu.Lock()
 	exp, ok := s.tickets[t]
-	delete(s.tickets, t)
 	s.tmu.Unlock()
 	if t == "" || !ok || time.Now().After(exp) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -271,25 +346,52 @@ func (s *Server) auth(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, signedOutPage)
 		return
 	}
-	sess := randomHex(32)
-	s.tmu.Lock()
-	if s.sessions == nil {
-		s.sessions = map[string]struct{}{}
-	}
-	s.sessions[sess] = struct{}{}
-	s.tmu.Unlock()
-	if s.Logs != nil {
-		s.Logs.Printf("ui: window signed in (%s)", r.UserAgent())
-	}
 	route := strings.TrimPrefix(r.URL.Query().Get("next"), "#")
 	if !strings.HasPrefix(route, "/") || strings.ContainsAny(route, "\r\n&#?\\ ") {
 		route = ""
 	}
-	// The session travels in the fragment (never sent to a server, kept out
-	// of logs/Referer); the page moves it into per-tab storage, which unlike
-	// cookies is isolated by port.
 	w.Header().Set("Cache-Control", "no-store")
-	http.Redirect(w, r, "/#s="+sess+"&r="+url.QueryEscape(route), http.StatusFound)
+	http.Redirect(w, r, "/#t="+t+"&r="+url.QueryEscape(route), http.StatusFound)
+}
+
+// newSessionHandler exchanges a single-use ticket for a window session.
+// hostCheck has already refused other sites (Sec-Fetch-Site) and hosts.
+func (s *Server) newSessionHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get(csrfHeader) == "" {
+		http.Error(w, "missing "+csrfHeader+" header", http.StatusForbidden)
+		return
+	}
+	var body struct {
+		Ticket string `json:"ticket"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&body); err != nil || body.Ticket == "" {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	s.tmu.Lock()
+	exp, ok := s.tickets[body.Ticket]
+	delete(s.tickets, body.Ticket)
+	s.tmu.Unlock()
+	if !ok || time.Now().After(exp) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	sess := s.newSession()
+	if s.Logs != nil {
+		s.Logs.Printf("ui: window signed in (%s)", r.UserAgent())
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, map[string]string{"session": sess})
+}
+
+// endSession revokes the caller's own window session (the CLI token can't
+// be revoked this way).
+func (s *Server) endSession(w http.ResponseWriter, r *http.Request) {
+	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	s.tmu.Lock()
+	delete(s.sessions, tok)
+	s.tmu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 const signedOutPage = `<!doctype html><meta charset="utf-8"><title>TailConnect</title>

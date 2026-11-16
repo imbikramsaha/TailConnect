@@ -7,10 +7,15 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/time/rate"
 
 	"github.com/imbikramsaha/tailconnect/internal/netx"
 	"github.com/imbikramsaha/tailconnect/internal/sysinfo"
@@ -77,10 +82,23 @@ type Server struct {
 	Host Host
 	Ops  Ops
 	Logf func(format string, args ...any)
-	srv  *http.Server
+	// SelfIPs returns this device's tailnet addresses. Requests must be
+	// addressed (and their signature bound) to one of them, so a request
+	// signed for another device can't be replayed here. Nil or empty
+	// skips the check (not known yet).
+	SelfIPs func() []netip.Addr
+	// Signer is this device's key; it signs Hello answers.
+	Signer ssh.Signer
+
+	smu    sync.Mutex // guards srv and closed (Serve and Close race at shutdown)
+	srv    *http.Server
+	closed bool
 
 	nonces   nonceCache
 	speedSem chan struct{}
+
+	lmu      sync.Mutex
+	limiters map[string]*nodeLimits // by caller node ID
 
 	tmu     sync.Mutex
 	tunnels map[string]map[net.Conn]struct{} // by caller node ID
@@ -138,14 +156,22 @@ func (s *Server) Serve(ln net.Listener) error {
 	mux.HandleFunc("PUT /v1/clipboard", s.need(AccessFull, s.setClipboard))
 	mux.HandleFunc("GET /v1/tunnel", s.need(AccessPorts, s.tunnel))
 	s.speedSem = make(chan struct{}, 2)
-	s.srv = &http.Server{
+	srv := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second, // file uploads extend their own deadline
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    32 << 10,
 	}
-	err := s.srv.Serve(ln)
+	s.smu.Lock()
+	if s.closed {
+		s.smu.Unlock()
+		ln.Close()
+		return nil
+	}
+	s.srv = srv
+	s.smu.Unlock()
+	err := srv.Serve(ln)
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
@@ -154,10 +180,14 @@ func (s *Server) Serve(ln net.Listener) error {
 
 // Close stops the server.
 func (s *Server) Close() error {
-	if s.srv == nil {
+	s.smu.Lock()
+	s.closed = true
+	srv := s.srv
+	s.smu.Unlock()
+	if srv == nil {
 		return nil
 	}
-	return s.srv.Close()
+	return srv.Close()
 }
 
 func (s *Server) logf(format string, args ...any) {
@@ -182,7 +212,76 @@ func (s *Server) caller(w http.ResponseWriter, r *http.Request) (Caller, bool) {
 		http.Error(w, "unknown caller", http.StatusForbidden)
 		return Caller{}, false
 	}
+	// Per-device rate limit, before any signature work, so no tailnet node
+	// (paired or not) can monopolise CPU, memory or disk here.
+	if !s.limits(c.NodeID).all.Allow() {
+		http.Error(w, "too many requests", http.StatusTooManyRequests)
+		return Caller{}, false
+	}
+	if !s.addressedToUs(r.Host) {
+		http.Error(w, "request is not addressed to this device", http.StatusMisdirectedRequest)
+		return Caller{}, false
+	}
 	return c, true
+}
+
+// addressedToUs reports whether a request's Host (which the caller signs)
+// names one of this device's tailnet addresses.
+func (s *Server) addressedToUs(host string) bool {
+	if s.SelfIPs == nil {
+		return true
+	}
+	self := s.SelfIPs()
+	if len(self) == 0 {
+		return true
+	}
+	h, port, err := net.SplitHostPort(host)
+	if err != nil || port != strconv.Itoa(Port) {
+		return false
+	}
+	ip, err := netip.ParseAddr(h)
+	if err != nil {
+		return false
+	}
+	for _, a := range self {
+		if a == ip.Unmap() {
+			return true
+		}
+	}
+	return false
+}
+
+// nodeLimits are one caller's request budgets.
+type nodeLimits struct {
+	all  *rate.Limiter // every request
+	pair *rate.Limiter // pairing requests (each may notify the user)
+	used time.Time
+}
+
+func (s *Server) limits(node string) *nodeLimits {
+	s.lmu.Lock()
+	defer s.lmu.Unlock()
+	if s.limiters == nil {
+		s.limiters = map[string]*nodeLimits{}
+	}
+	now := time.Now()
+	l := s.limiters[node]
+	if l == nil {
+		if len(s.limiters) > 1024 { // forget idle callers
+			for k, v := range s.limiters {
+				if now.Sub(v.used) > 10*time.Minute {
+					delete(s.limiters, k)
+				}
+			}
+		}
+		l = &nodeLimits{
+			all:  rate.NewLimiter(rate.Limit(20), 60),            // ample for the UI's polling and tunnels
+			pair: rate.NewLimiter(rate.Every(10*time.Second), 6), // a person pairing needs a handful
+		}
+		s.limiters[node] = l
+	}
+	l.used = now
+	return l
 }
 
 type handler func(w http.ResponseWriter, r *http.Request, c Caller, access string)
@@ -231,12 +330,28 @@ func (s *Server) hello(w http.ResponseWriter, r *http.Request) {
 	if access != "" && s.nonces.verifyRequest(r, s.Host.PeerKey(c.NodeID)) != nil {
 		access = ""
 	}
-	writeJSON(w, http.StatusOK, s.Host.Hello(c, access))
+	body, err := json.Marshal(s.Host.Hello(c, access))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	body = append(body, '\n')
+	if nonce := r.Header.Get(hdrNonce); s.Signer != nil && len(nonce) == 32 {
+		if sig, err := signResponse(s.Signer, nonce, body); err == nil {
+			w.Header().Set(hdrRespSig, sig)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
 }
 
 func (s *Server) pair(w http.ResponseWriter, r *http.Request) {
 	c, ok := s.caller(w, r)
 	if !ok {
+		return
+	}
+	if !s.limits(c.NodeID).pair.Allow() {
+		http.Error(w, "too many pairing requests; try again in a minute", http.StatusTooManyRequests)
 		return
 	}
 	var req PairRequest
@@ -339,14 +454,31 @@ func (s *Server) services(w http.ResponseWriter, r *http.Request, c Caller, _ st
 	writeJSON(w, http.StatusOK, out)
 }
 
-func (s *Server) containers(w http.ResponseWriter, r *http.Request, _ Caller, _ string) {
+func (s *Server) containers(w http.ResponseWriter, r *http.Request, c Caller, access string) {
 	cs, err := s.Ops.Containers(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, err)
 		return
 	}
+	if access != AccessFull {
+		// Below full access, only containers publishing a port the caller
+		// may reach (its port list, if limited).
+		kept := cs[:0]
+		for _, ct := range cs {
+			for _, m := range publishedPort.FindAllStringSubmatch(ct.Ports, -1) {
+				if p, err := strconv.Atoi(m[1]); err == nil && s.Host.AllowPort(c.NodeID, p) {
+					kept = append(kept, ct)
+					break
+				}
+			}
+		}
+		cs = kept
+	}
 	writeJSON(w, http.StatusOK, cs)
 }
+
+// publishedPort matches a host port in docker's "0.0.0.0:8080->80/tcp".
+var publishedPort = regexp.MustCompile(`:(\d{1,5})->`)
 
 func (s *Server) containerAction(w http.ResponseWriter, r *http.Request, c Caller, _ string) {
 	id, action := r.PathValue("id"), r.PathValue("action")

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -38,6 +39,8 @@ func NewClient(dial DialFunc, signer ssh.Signer) *Client {
 		MaxIdleConnsPerHost:   2,
 		IdleConnTimeout:       60 * time.Second,
 		ResponseHeaderTimeout: 20 * time.Second,
+		// A malicious peer must not exhaust our memory with its answers.
+		MaxResponseHeaderBytes: 64 << 10,
 	}
 	return &Client{dial: dial, hc: &http.Client{Transport: tr}, signer: signer}
 }
@@ -88,16 +91,42 @@ type StatusError struct {
 
 func (e *StatusError) Error() string { return fmt.Sprintf("agent: %d %s", e.Code, e.Msg) }
 
-// Hello fetches a device's description.
-func (c *Client) Hello(ctx context.Context, ip string) (*Hello, error) {
+// Proof reports whether a response was signed, for the request that
+// fetched it, by key (authorized_keys format).
+type Proof func(key string) bool
+
+// Hello fetches a device's description, with a Proof of who answered.
+func (c *Client) Hello(ctx context.Context, ip string) (*Hello, Proof, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base(ip)+"/v1/hello", nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := signRequest(req, c.signer); err != nil {
+		return nil, nil, err
+	}
+	nonce := req.Header.Get(hdrNonce)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, nil, &StatusError{Code: resp.StatusCode, Msg: strings.TrimSpace(string(msg))}
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, nil, err
+	}
 	var h Hello
-	if err := c.do(ctx, http.MethodGet, ip, "/v1/hello", nil, &h); err != nil {
-		return nil, err
+	if err := json.Unmarshal(body, &h); err != nil {
+		return nil, nil, err
 	}
 	if h.App != AppID {
-		return nil, fmt.Errorf("not a TailConnect device")
+		return nil, nil, fmt.Errorf("not a TailConnect device")
 	}
-	return &h, nil
+	sig := resp.Header.Get(hdrRespSig)
+	return &h, func(key string) bool { return verifyResponse(key, nonce, body, sig) }, nil
 }
 
 // Pair asks ip to trust us.
@@ -145,7 +174,10 @@ func (c *Client) Tunnel(ctx context.Context, ip string, port int) (net.Conn, err
 		conn.Close()
 		return nil, err
 	}
-	br := bufio.NewReader(conn)
+	// Cap the response header a peer can make us buffer; lifted once the
+	// tunnel is established.
+	lr := &io.LimitedReader{R: conn, N: 64 << 10}
+	br := bufio.NewReader(lr)
 	resp, err := http.ReadResponse(br, req)
 	if err != nil {
 		conn.Close()
@@ -158,6 +190,7 @@ func (c *Client) Tunnel(ctx context.Context, ip string, port int) (net.Conn, err
 		return nil, &StatusError{Code: resp.StatusCode, Msg: strings.TrimSpace(string(msg))}
 	}
 	_ = conn.SetDeadline(time.Time{})
+	lr.N = math.MaxInt64
 	return &netx.BufConn{Conn: conn, R: br}, nil
 }
 
@@ -245,7 +278,7 @@ func (c *Client) SendFile(ctx context.Context, ip, name string, size int64, r io
 		return nil, &StatusError{Code: resp.StatusCode, Msg: strings.TrimSpace(string(msg))}
 	}
 	var fr FileResult
-	return &fr, json.NewDecoder(resp.Body).Decode(&fr)
+	return &fr, json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&fr)
 }
 
 // GetClipboard reads the device's clipboard.

@@ -48,6 +48,9 @@ type Hello struct {
 	// HostKey is the built-in SSH server's host key (authorized_keys
 	// format), so peers pin it instead of trusting it on first use.
 	HostKey string `json:"hostKey,omitempty"`
+	// DeviceKey is this device's TailConnect key (authorized_keys format),
+	// which signs its Hello answers (see hdrRespSig).
+	DeviceKey string `json:"deviceKey,omitempty"`
 }
 
 // PairRequest asks a device to trust the caller.

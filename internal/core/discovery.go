@@ -77,6 +77,7 @@ func (c *Core) refresh() {
 	c.mu.Lock()
 	c.selfUserID = int64(st.Self.UserID)
 	c.selfNodeID = string(st.Self.ID)
+	c.selfIPs = slices.Clone(st.Self.TailscaleIPs)
 	next := make(map[string]*peerInfo, len(st.Peer))
 	for _, ps := range st.Peer {
 		id := string(ps.ID)
@@ -156,7 +157,7 @@ func (c *Core) probe(list []*peerInfo) {
 			ip := p.IP
 			c.mu.Unlock()
 			ctx, cancel := context.WithTimeout(c.ctx, 4*time.Second)
-			h, err := c.agentCli.Hello(ctx, ip)
+			h, err := c.verifiedHello(ctx, p.NodeID, ip)
 			cancel()
 			c.mu.Lock()
 			if err != nil {

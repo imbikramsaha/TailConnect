@@ -290,11 +290,13 @@ func SafeName(name string) (string, error) {
 	if name == "" || strings.ContainsAny(name, `/\`) {
 		return "", errors.New("invalid file name")
 	}
-	// Windows reserved device names (CON, NUL, COM1…), with any extension.
-	base := strings.ToUpper(strings.SplitN(name, ".", 2)[0])
+	// Windows reserved device names (CON, NUL, COM1…, COM¹…, CONIN$), with
+	// any extension and with trailing spaces ("CON .txt" is CON too).
+	base := strings.ToUpper(strings.TrimRight(strings.SplitN(name, ".", 2)[0], " "))
 	switch base {
-	case "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9":
+	case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+		"COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "COM¹", "COM²", "COM³",
+		"LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT¹", "LPT²", "LPT³":
 		name = "_" + name
 	}
 	name = strings.ToValidUTF8(name, "_")
@@ -364,12 +366,16 @@ func Receive(dir, name string, r io.Reader) (string, int64, error) {
 	return "", 0, errors.New("too many files with that name")
 }
 
-// quarantine marks a received file as downloaded from elsewhere so macOS
-// Gatekeeper checks it before it can run (like files from a browser).
+// quarantine marks a received file as downloaded from elsewhere, like files
+// from a browser: macOS Gatekeeper checks it before it can run, and Windows
+// SmartScreen / Office Protected View treat it as from the internet.
 func quarantine(path string) {
-	if runtime.GOOS != "darwin" {
-		return
+	switch runtime.GOOS {
+	case "darwin":
+		val := fmt.Sprintf("0081;%08x;TailConnect;", time.Now().Unix())
+		_ = exec.Command("/usr/bin/xattr", "-w", "com.apple.quarantine", val, path).Run()
+	case "windows":
+		// Mark of the Web: the Zone.Identifier alternate data stream.
+		_ = os.WriteFile(path+":Zone.Identifier", []byte("[ZoneTransfer]\r\nZoneId=3\r\n"), 0o600)
 	}
-	val := fmt.Sprintf("0081;%08x;TailConnect;", time.Now().Unix())
-	_ = exec.Command("/usr/bin/xattr", "-w", "com.apple.quarantine", val, path).Run()
 }

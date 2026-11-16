@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 )
@@ -130,8 +131,14 @@ type Target struct {
 }
 
 // remotePath converts a remote home dir into a vscode-remote URI path.
+// safeRemoteHome is what a remote home directory may contain before it is
+// put in an editor command line (on Windows those run through .cmd shims,
+// where cmd.exe interprets & | < > ^ ( ) ! % and quotes). Callers already
+// validate; this is a second line of defence.
+var safeRemoteHome = regexp.MustCompile(`^[\p{L}\p{N} ._@+~/\\:-]{1,512}$`)
+
 func remotePath(home string) string {
-	if home == "" {
+	if home == "" || !safeRemoteHome.MatchString(home) {
 		return ""
 	}
 	if len(home) >= 2 && home[1] == ':' { // Windows host: C:\Users\x -> /C:/Users/x
@@ -323,6 +330,10 @@ func OpenVNC(host string, port int) error {
 // trustedFile reports whether an executable found outside PATH is safe to
 // run: not writable by others, in a directory not writable by others, and
 // owned by root or the current user (Unix; always true elsewhere).
+// TrustedFile reports whether p and its directory are writable only by
+// this user or root (so no other local user could have planted p).
+func TrustedFile(p string) bool { return trustedFile(p) }
+
 func trustedFile(p string) bool {
 	if runtime.GOOS == "windows" {
 		return true

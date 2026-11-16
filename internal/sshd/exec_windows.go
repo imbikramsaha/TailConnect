@@ -90,9 +90,11 @@ func start(command string, env []string, pr *ptyReq, remote string, ch ssh.Chann
 	}
 	cmd := exec.Command(cmdExe())
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CmdLine:       commandLine(command),
-		HideWindow:    true,
-		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_NO_WINDOW,
+		CmdLine:    commandLine(command),
+		HideWindow: true,
+		// Suspended until it is in the kill-on-close job, so nothing it
+		// starts can escape the job (and outlive a revoked session).
+		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_NO_WINDOW | windows.CREATE_SUSPENDED,
 	}
 	cmd.Dir = home
 	cmd.Env = sessionEnv(remote, env)
@@ -105,12 +107,11 @@ func start(command string, env []string, pr *ptyReq, remote string, ch ssh.Chann
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	job, jerr := newKillJob()
-	if jerr == nil {
-		if h, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid)); err == nil {
-			_ = windows.AssignProcessToJobObject(job, h)
-			windows.CloseHandle(h)
-		}
+	job, jerr := jobAndResume(cmd.Process.Pid)
+	if jerr != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, jerr
 	}
 	var jobOnce sync.Once
 	closeJob := func() {
@@ -227,7 +228,19 @@ func startConPTY(cmdline string, env []string, dir string, pr *ptyReq, ch ssh.Ch
 	// starts outlives the session.
 	job, jerr := newKillJob()
 	if jerr == nil {
-		_ = windows.AssignProcessToJobObject(job, pi.Process)
+		if err := windows.AssignProcessToJobObject(job, pi.Process); err != nil {
+			windows.CloseHandle(job)
+			jerr = err
+		}
+	}
+	if jerr != nil { // fail closed: never run a shell that could outlive the session
+		_ = windows.TerminateProcess(pi.Process, 1)
+		windows.CloseHandle(pi.Thread)
+		windows.CloseHandle(pi.Process)
+		windows.ClosePseudoConsole(hpc)
+		windows.CloseHandle(inW)
+		windows.CloseHandle(outR)
+		return nil, fmt.Errorf("starting shell: %w", jerr)
 	}
 	_, _ = windows.ResumeThread(pi.Thread)
 	windows.CloseHandle(pi.Thread)
@@ -340,6 +353,35 @@ func newKillJob() (windows.Handle, error) {
 		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil {
 		windows.CloseHandle(job)
 		return 0, err
+	}
+	return job, nil
+}
+
+const processSuspendResume = 0x0800
+
+var ntResumeProcess = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtResumeProcess")
+
+// jobAndResume puts a suspended process in a new kill-on-close job and then
+// lets it run. It fails closed: a process that can't be put in the job is
+// not resumed.
+func jobAndResume(pid int) (windows.Handle, error) {
+	job, err := newKillJob()
+	if err != nil {
+		return 0, err
+	}
+	h, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE|processSuspendResume, false, uint32(pid))
+	if err != nil {
+		windows.CloseHandle(job)
+		return 0, err
+	}
+	defer windows.CloseHandle(h)
+	if err := windows.AssignProcessToJobObject(job, h); err != nil {
+		windows.CloseHandle(job)
+		return 0, err
+	}
+	if st, _, _ := ntResumeProcess.Call(uintptr(h)); st != 0 {
+		windows.CloseHandle(job)
+		return 0, fmt.Errorf("resume process: NTSTATUS %#x", st)
 	}
 	return job, nil
 }

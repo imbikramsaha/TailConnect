@@ -22,6 +22,7 @@ import (
 	"github.com/imbikramsaha/tailconnect/internal/forward"
 	"github.com/imbikramsaha/tailconnect/internal/hostops"
 	"github.com/imbikramsaha/tailconnect/internal/launch"
+	"github.com/imbikramsaha/tailconnect/internal/logx"
 	"github.com/imbikramsaha/tailconnect/internal/sshx"
 	"github.com/imbikramsaha/tailconnect/internal/store"
 )
@@ -511,6 +512,9 @@ func (c *Core) SendFile(ctx context.Context, id, name string, size int64, r io.R
 		if err != nil {
 			return "", err
 		}
+		if err := c.verifyPeer(ctx, dev, ip); err != nil {
+			return "", err
+		}
 		res, err := c.agentCli.SendFile(ctx, ip, name, size, r)
 		if err != nil {
 			return "", err
@@ -607,6 +611,9 @@ func (c *Core) clipPeer(id string) (store.Device, string, error) {
 		return dev, "", errors.New("clipboard sharing needs TailConnect on both devices")
 	}
 	ip, err := c.peerIP(dev)
+	if err == nil {
+		err = c.verifyPeer(context.Background(), dev, ip)
+	}
 	return dev, ip, err
 }
 
@@ -661,7 +668,9 @@ func (c *Core) ReportBundle(ctx context.Context) (string, error) {
 			}
 			w, err := zw.Create("logs/" + e.Name())
 			if err == nil {
-				_, _ = io.Copy(w, io.LimitReader(src, 20<<20))
+				// Redact again: older lines may predate redaction at write time.
+				b, _ := io.ReadAll(io.LimitReader(src, 20<<20))
+				_, _ = io.WriteString(w, logx.Redact(string(b)))
 			}
 			src.Close()
 		}

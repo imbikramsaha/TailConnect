@@ -107,6 +107,13 @@ func Render(entries []Entry, o Options) string {
 		fmt.Fprintf(&b, "  UserKnownHostsFile %s\n", cfgPath(o.KnownHosts))
 		b.WriteString("  StrictHostKeyChecking accept-new\n")
 		b.WriteString("  ServerAliveInterval 15\n")
+		// Never hand the other machine your SSH agent or X display, even if
+		// a "Host *" block in ~/.ssh/config enables it (TailConnect's Include
+		// comes first, and the first value ssh finds wins).
+		b.WriteString("  ForwardAgent no\n")
+		b.WriteString("  ForwardX11 no\n")
+		b.WriteString("  ForwardX11Trusted no\n")
+		b.WriteString("  PermitLocalCommand no\n")
 		if e.Proxy {
 			fmt.Fprintf(&b, "  ProxyCommand %s proxy %s %%p\n", cfgPath(o.Exe), e.DeviceID)
 		}

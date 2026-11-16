@@ -79,6 +79,8 @@ type PairRequestView struct {
 	SameUser  bool      `json:"sameUser"`
 	Code      string    `json:"code"`
 	Created   time.Time `json:"created"`
+	// NewKey: the device is already paired and now presents a different key.
+	NewKey bool `json:"newKey"`
 }
 
 // SelfView describes this device.
@@ -269,9 +271,10 @@ func (c *Core) Snapshot(ctx context.Context) View {
 		if in.Status != "pending" {
 			continue
 		}
+		_, paired := st.Trust(in.NodeID)
 		v.PairRequests = append(v.PairRequests, PairRequestView{
-			ID: in.ID, Name: in.Name, NodeName: in.NodeName, LoginName: in.LoginName, Code: in.Code,
-			OS: in.OS, SameUser: in.UserID != 0 && in.UserID == c.selfUserID, Created: in.Created,
+			ID: in.ID, Name: in.Name, NodeName: SafeName(in.NodeName), LoginName: in.LoginName, Code: in.Code,
+			OS: in.OS, SameUser: in.UserID != 0 && in.UserID == c.selfUserID, Created: in.Created, NewKey: paired,
 		})
 	}
 	sort.Slice(v.PairRequests, func(i, j int) bool { return v.PairRequests[i].Created.Before(v.PairRequests[j].Created) })

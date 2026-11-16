@@ -164,8 +164,11 @@ func (c *Core) establish(ctx context.Context, dev store.Device, cs *connState) e
 			return errors.New("device is offline")
 		}
 		hctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-		h, err := c.agentCli.Hello(hctx, p.IP)
+		h, err := c.verifiedHello(hctx, dev.NodeID, p.IP)
 		cancel()
+		if errors.Is(err, errUnverified) {
+			return err
+		}
 		if err != nil {
 			return fmt.Errorf("device not responding: %w", err)
 		}
@@ -188,7 +191,7 @@ func (c *Core) establish(ctx context.Context, dev store.Device, cs *connState) e
 		}
 		if dev.Home == "" {
 			hctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			home := sshx.HomeDir(hctx, cl)
+			home, _ := SafeHome(sshx.HomeDir(hctx, cl))
 			cancel()
 			if home != "" {
 				_ = c.store.Update(func(st *store.State) error {
@@ -250,7 +253,7 @@ func (c *Core) supervise(ctx context.Context, dev store.Device, cs *connState) e
 		} else {
 			hctx, cancel := context.WithTimeout(ctx, 6*time.Second)
 			var trusted bool
-			if h, herr := c.agentCli.Hello(hctx, p.IP); herr != nil {
+			if h, herr := c.verifiedHello(hctx, dev.NodeID, p.IP); herr != nil {
 				err = herr
 			} else {
 				trusted = h.Trusted

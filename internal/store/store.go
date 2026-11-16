@@ -116,6 +116,11 @@ type Device struct {
 	// Wake-on-LAN details, remembered while the device was online.
 	MACs []string `json:"macs,omitempty"`
 	LANs []string `json:"lans,omitempty"` // CIDRs, e.g. 192.168.1.0/24
+	// PeerKey is the TailConnect device key a peer signed its answers with
+	// (pinned on first signed contact). Once set, answers not signed with
+	// it — e.g. another program on that machine posing as TailConnect —
+	// are refused.
+	PeerKey string `json:"peerKey,omitempty"`
 }
 
 // App is a custom app: a remote port forwarded to localhost, optionally

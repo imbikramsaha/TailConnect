@@ -155,10 +155,13 @@ func (c *Core) StartApp(ctx context.Context, deviceID, appID string) (*running, 
 	// A fresh random token per start: scripts can use $TC_APP_TOKEN to
 	// protect the service, and the opened URL can carry it via {token}.
 	token := randomToken()
-	envPrefix := "TC_APP_TOKEN=" + token + " "
 	// Start the remote service unless something is already listening.
 	alreadyUp := c.remotePortOpen(ctx, dev, app.Port)
 	script := remoteDir + "/scripts/port-" + strconv.Itoa(app.Port) + ".sh"
+	// The token travels in an owner-only file, never on a command line
+	// (where other users on either machine could read it with ps).
+	tokenFile := remoteDir + "/scripts/port-" + strconv.Itoa(app.Port) + ".token"
+	envPrefix := `TC_APP_TOKEN="$(cat "$HOME/` + tokenFile + `")" `
 	if strings.TrimSpace(app.Script) != "" && !alreadyUp {
 		cl, err := c.sshClient(ctx, dev)
 		if err != nil {
@@ -167,6 +170,10 @@ func (c *Core) StartApp(ctx context.Context, deviceID, appID string) (*running, 
 		up := fmt.Sprintf(`mkdir -p "$HOME/%[1]s/scripts" "$HOME/%[1]s/logs" && cat > "$HOME/%[2]s" && chmod 700 "$HOME/%[2]s"`, remoteDir, script)
 		if _, err := sshx.Run(ctx, cl, up, strings.NewReader(app.Script+"\n")); err != nil {
 			return fail(fmt.Errorf("uploading launch script: %w", err))
+		}
+		tok := fmt.Sprintf(`umask 077 && cat > "$HOME/%s"`, tokenFile)
+		if _, err := sshx.Run(ctx, cl, tok, strings.NewReader(token)); err != nil {
+			return fail(fmt.Errorf("uploading app token: %w", err))
 		}
 		if !app.InTerminal {
 			logBase := `$HOME/` + remoteDir + `/logs/port-` + strconv.Itoa(app.Port)
