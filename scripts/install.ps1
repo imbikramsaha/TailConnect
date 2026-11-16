@@ -73,7 +73,12 @@ try {
 
   # 3) Install for this user and start TailConnect (the installer launches it).
   Say "Installing..."
-  $p = Start-Process -FilePath $Setup -ArgumentList "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
+  # Not Start-Process -Wait: in Windows PowerShell that also waits for every
+  # process the installer starts, and the installer starts TailConnect,
+  # which keeps running. Wait for the installer process alone.
+  $p = Start-Process -FilePath $Setup -ArgumentList "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -PassThru
+  $null = $p.Handle # keeps the exit code readable after the process ends
+  $p.WaitForExit()
   if ($p.ExitCode -ne 0) { Fail "the installer exited with code $($p.ExitCode)" }
   Say "TailConnect is installed and starting - look for its icon in the system tray."
   Say "Open it any time from the Start menu. The 'tailconnect' command works in new terminals."

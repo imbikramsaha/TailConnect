@@ -1,10 +1,20 @@
 name: Install test
 
-# Runs the README's one-line install commands on clean machines against the
-# published release, so the documented install path is always known to work.
+# Runs the README's one-line install commands on clean machines, so the
+# documented install path is always known to work:
+#  - on release: the published install scripts, exactly as users run them;
+#  - when the scripts change (and weekly/manually): the scripts from this
+#    commit against the latest published release, so a script fix is proven
+#    before it ships in a release.
 on:
   release:
     types: [published]
+  push:
+    branches: [main]
+    paths:
+      - scripts/install.sh
+      - scripts/install.ps1
+      - .github/workflows/install-test.yml
   workflow_dispatch:
   schedule:
     - cron: "41 5 * * 3"
@@ -12,13 +22,26 @@ on:
 permissions:
   contents: read
 
+env:
+  RELEASED: ${{ github.event_name == 'release' }}
+
 jobs:
   windows:
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        if: env.RELEASED != 'true'
+        with:
+          persist-credentials: false
       - name: Install (README command)
+        if: env.RELEASED == 'true'
         shell: powershell
         run: irm https://github.com/imbikramsaha/TailConnect/releases/latest/download/install.ps1 | iex
+      - name: Install (this commit's script)
+        if: env.RELEASED != 'true'
+        shell: powershell
+        run: Get-Content -Raw scripts/install.ps1 | iex
       - name: Check
         shell: powershell
         run: |
@@ -30,9 +53,19 @@ jobs:
 
   macos:
     runs-on: macos-latest
+    timeout-minutes: 15
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        if: env.RELEASED != 'true'
+        with:
+          persist-credentials: false
       - name: Install (README command)
+        if: env.RELEASED == 'true'
         run: curl -fsSL https://github.com/imbikramsaha/TailConnect/releases/latest/download/install.sh | sh
+      - name: Install (this commit's script)
+        if: env.RELEASED != 'true'
+        # No locale, as on many Macs: catches scripts that depend on one.
+        run: env -u LANG -u LC_ALL -u LC_CTYPE sh < scripts/install.sh
       - name: Check
         run: |
           APP=/Applications/TailConnect.app
@@ -46,9 +79,18 @@ jobs:
       matrix:
         runner: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        if: env.RELEASED != 'true'
+        with:
+          persist-credentials: false
       - name: Install (README command)
+        if: env.RELEASED == 'true'
         run: curl -fsSL https://github.com/imbikramsaha/TailConnect/releases/latest/download/install.sh | sh
+      - name: Install (this commit's script)
+        if: env.RELEASED != 'true'
+        run: sh < scripts/install.sh
       - name: Check
         run: |
           dpkg -s tailconnect | grep -E '^(Status|Version)'
@@ -58,8 +100,17 @@ jobs:
   fedora:
     runs-on: ubuntu-latest
     container: fedora:latest
+    timeout-minutes: 15
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        if: env.RELEASED != 'true'
+        with:
+          persist-credentials: false
       - name: Install (README command)
+        if: env.RELEASED == 'true'
         run: curl -fsSL https://github.com/imbikramsaha/TailConnect/releases/latest/download/install.sh | sh
+      - name: Install (this commit's script)
+        if: env.RELEASED != 'true'
+        run: sh < scripts/install.sh
       - name: Check
         run: rpm -q tailconnect && tailconnect version
