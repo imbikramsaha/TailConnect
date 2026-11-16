@@ -14,13 +14,66 @@ import (
 )
 
 // ScreenInfo tells paired devices how to view this computer's screen: the
-// RustDesk password TailConnect set, if it set one up.
+// RustDesk password TailConnect set, if it set one up. A device asks just
+// before it connects, so this also starts RustDesk if needed.
 func (c *Core) ScreenInfo() agent.ScreenInfo {
 	rd := c.store.Get().RustDesk
+	if rd.Configured {
+		c.ensureRustDesk()
+	}
 	if rd.Password == "" {
 		return agent.ScreenInfo{}
 	}
 	return agent.ScreenInfo{RustDesk: &agent.RustDeskInfo{Port: agent.RustDeskPort, Password: rd.Password}}
+}
+
+// startsOnDemand: on a Mac, RustDesk accepts connections only while its app
+// runs (nothing starts it at login unless the user installed its optional
+// system service), so TailConnect starts it when a device connects.
+func (c *Core) startsOnDemand() bool { return runtime.GOOS == "darwin" && !c.opts.Headless }
+
+// ensureRustDesk starts RustDesk here if it isn't accepting connections and
+// can be started, and waits up to 10 seconds for it.
+func (c *Core) ensureRustDesk() {
+	if !c.startsOnDemand() || rustdesk.Listening() || launch.RustDeskRunning() {
+		return
+	}
+	c.logs.Session.Printf("starting RustDesk for a screen-sharing connection")
+	if err := launch.StartRustDesk(); err != nil {
+		c.logs.Printf("starting RustDesk: %v", err)
+		return
+	}
+	for i := 0; i < 40 && !rustdesk.Listening(); i++ {
+		time.Sleep(250 * time.Millisecond)
+	}
+	c.forgetScreenHealth()
+}
+
+// screenHealth caches a look at RustDesk on this computer (the UI asks for
+// state often; this dials RustDesk's port and lists processes).
+type screenHealth struct {
+	at                           time.Time
+	listening, running, needsFix bool
+}
+
+func (c *Core) rustDeskHealth() screenHealth {
+	c.mu.Lock()
+	h := c.screenHealth
+	c.mu.Unlock()
+	if time.Since(h.at) < 5*time.Second {
+		return h
+	}
+	h = screenHealth{at: time.Now(), listening: rustdesk.Listening(), running: launch.RustDeskRunning(), needsFix: rustdesk.NeedsRepair()}
+	c.mu.Lock()
+	c.screenHealth = h
+	c.mu.Unlock()
+	return h
+}
+
+func (c *Core) forgetScreenHealth() {
+	c.mu.Lock()
+	c.screenHealth = screenHealth{}
+	c.mu.Unlock()
 }
 
 // screenView reports screen-sharing setup for the UI.
@@ -30,7 +83,7 @@ func (c *Core) screenView() ScreenView {
 	c.mu.Lock()
 	running, errText := c.screenSetup.running, c.screenSetup.err
 	c.mu.Unlock()
-	return ScreenView{
+	v := ScreenView{
 		RustDeskInstalled: installed,
 		Configured:        st.RustDesk.Configured,
 		PasswordKnown:     st.RustDesk.Password != "",
@@ -38,7 +91,23 @@ func (c *Core) screenView() ScreenView {
 		Version:           st.RustDesk.Version,
 		Running:           running,
 		Error:             errText,
+		StartsOnDemand:    c.startsOnDemand(),
 	}
+	if installed && !c.opts.Headless {
+		h := c.rustDeskHealth()
+		v.Listening, v.AppRunning, v.NeedsRepair = h.listening, h.running, h.needsFix
+	}
+	return v
+}
+
+// checkScreenSetup tells the user once per start if screen sharing set up
+// by TailConnect 0.3.9 needs repairing (RustDesk can't read its settings).
+func (c *Core) checkScreenSetup() {
+	if c.opts.Headless || !c.store.Get().RustDesk.Configured || !rustdesk.NeedsRepair() {
+		return
+	}
+	c.logs.Printf("screen sharing: RustDesk can't read its settings; setup needs repairing")
+	c.notify("Screen sharing needs a quick repair", "RustDesk can't read its settings. Open Settings → Screen sharing and click Repair.", "#/settings/screen")
 }
 
 // StartScreenSetup installs (if needed) and configures RustDesk for screen
@@ -64,6 +133,7 @@ func (c *Core) StartScreenSetup() error {
 		if err != nil {
 			c.screenSetup.err = err.Error()
 		}
+		c.screenHealth = screenHealth{}
 		c.mu.Unlock()
 		c.events.Notify()
 	}()

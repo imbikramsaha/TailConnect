@@ -309,7 +309,11 @@ func Apply(ctx context.Context, spec Spec) Result {
 		res.Version = installedVersion(bin)
 	}
 	if runtime.GOOS == "darwin" && spec.UID > 0 {
-		repairUserConfig(spec.UID)
+		if repairUserConfig(spec.UID) {
+			// A running RustDesk read its settings before they were
+			// repaired (and would overwrite them): start it afresh.
+			stopInSession(spec.UID)
+		}
 		startInSession(spec.UID)
 	}
 	// RustDesk's command line sends settings to the running RustDesk (which

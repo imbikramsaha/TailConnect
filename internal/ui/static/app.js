@@ -775,17 +775,29 @@ function viewSettings(tab) {
       <p class="small muted">A custom app forwards a port from a device to <code>localhost</code> on this computer. An optional bash launch script starts the service first (Linux/macOS). Scripts and logs live in <code>~/.config/tailconnect</code> on the device.</p>`;
   } else if (tab === "screen") {
     const sc = S.screen || {};
-    const status = sc.running ? `<span class="spinner sm"></span> Setting up — confirm the administrator prompt`
-      : sc.configured ? (sc.passwordKnown ? "Set up — your devices connect without a password" : "Set up — enter RustDesk's password when connecting")
-      : sc.rustdeskInstalled ? "Installed, not set up for TailConnect yet" : "Not installed";
     const mac = S.self.os === "darwin";
+    const signIn = sc.passwordKnown ? "your devices connect without a password" : "enter RustDesk's password when connecting";
+    let status, warn = "";
+    if (sc.running) status = `<span class="spinner sm"></span> Setting up — confirm the administrator prompt`;
+    else if (!sc.configured) status = sc.rustdeskInstalled ? "Installed, not set up for TailConnect yet" : "Not installed";
+    else if (sc.needsRepair) {
+      status = "Needs repair";
+      warn = "RustDesk can't read settings an earlier TailConnect version saved, so your devices can't connect. Click <b>Repair</b> — it asks for your administrator password once.";
+    } else if (sc.listening) status = "Ready — " + signIn;
+    else if (sc.startsOnDemand && !sc.appRunning) status = "Ready — RustDesk starts when one of your devices connects; " + signIn;
+    else {
+      status = "Not accepting connections";
+      warn = `RustDesk is ${sc.appRunning ? "running, but not accepting direct connections" : "not running"}, so your devices can't connect. Click <b>Set up again</b> to fix it.` +
+        (S.self.os === "linux" ? " On Linux, RustDesk also needs you signed in to the desktop." : "");
+    }
+    const setupLabel = sc.needsRepair ? "Repair" : sc.configured ? "Set up again" : sc.rustdeskInstalled ? "Set up" : "Install & set up";
     body = `<p class="muted">Screen sharing uses <a href="#" data-act="ext" data-url="https://rustdesk.com">RustDesk</a> — free, open source, and it works between Mac, Windows (including Home) and Linux. TailConnect connects it through your private network: no RustDesk servers, nothing open to the internet.</p>
       <div class="card">
         ${field("RustDesk on this computer", status + (sc.version ? ` <span class="faint">(${h(sc.version)})</span>` : ""),
-          `<button class="btn ${sc.configured ? "" : "primary"}" data-act="screen-setup" ${sc.running ? "disabled" : ""}>${sc.configured ? "Set up again" : sc.rustdeskInstalled ? "Set up" : "Install & set up"}</button>`)}
+          `<button class="btn ${sc.configured && !warn ? "" : "primary"}" data-act="screen-setup" ${sc.running ? "disabled" : ""}>${setupLabel}</button>`)}
         ${field("Only through TailConnect", "RustDesk here accepts connections only from your paired devices, through TailConnect. Turn off to also use RustDesk's own IDs, e.g. to help someone outside your devices. Changing it asks for your administrator password.", toggle("rustdeskLock", S.settings.rustdeskLock !== false, sc.running ? "disabled" : ""))}
       </div>
-      ${sc.error ? `<div class="alert bad">${h(sc.error)}</div>` : ""}
+      ${sc.error ? `<div class="alert bad">${h(sc.error)}</div>` : warn && !sc.running ? `<div class="alert">${warn}</div>` : ""}
       ${mac ? `<h2 class="sec">Allow screen sharing on this Mac</h2>
       <div class="card">
         ${field("Screen Recording", "Lets RustDesk show this Mac's screen to your devices. Apple requires you to turn this on yourself.", `<button class="btn" data-act="screen-perm" data-pane="screen">Open settings</button>`)}

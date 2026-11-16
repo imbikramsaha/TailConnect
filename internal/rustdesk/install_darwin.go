@@ -10,8 +10,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func install(ctx context.Context, dmg string) error {
@@ -72,46 +73,43 @@ func startInSession(uid int) {
 	}
 }
 
-// repairUserConfig gives the user back RustDesk settings files that an
-// earlier administrator run (TailConnect 0.3.9) left owned by root in the
-// user's settings folder — the user's RustDesk can't read them, so it loses
-// its settings (direct access, password) the next time it starts.
-// Only RustDesk's own settings files are touched, and links are never
-// followed (Lstat/Lchown): this runs as root in a folder the user controls.
-func repairUserConfig(uid int) {
-	u, err := user.LookupId(strconv.Itoa(uid))
-	if err != nil || u.HomeDir == "" {
-		return
-	}
-	gid, _ := strconv.Atoi(u.Gid)
-	dir := filepath.Join(u.HomeDir, "Library", "Preferences", "com.carriez.RustDesk")
-	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
-		return
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	if st, ok := mustStat(dir); ok && st.Uid == 0 {
-		_ = os.Lchown(dir, uid, gid)
-	}
-	for _, e := range entries {
-		name := e.Name()
-		if !strings.HasPrefix(name, "RustDesk") || !strings.HasSuffix(name, ".toml") {
-			continue
+// stopInSession quits the user's RustDesk (all its processes), waiting up
+// to five seconds.
+func stopInSession(uid int) {
+	u := strconv.Itoa(uid)
+	_ = exec.Command("pkill", "-TERM", "-x", "-U", u, "RustDesk").Run()
+	for i := 0; i < 20; i++ {
+		if exec.Command("pgrep", "-x", "-U", u, "RustDesk").Run() != nil {
+			return
 		}
-		p := filepath.Join(dir, name)
-		if st, ok := mustStat(p); ok && st.Uid == 0 && st.Mode&syscall.S_IFMT == syscall.S_IFREG {
-			_ = os.Lchown(p, uid, gid)
-		}
+		time.Sleep(250 * time.Millisecond)
 	}
 }
 
-func mustStat(p string) (*syscall.Stat_t, bool) {
-	fi, err := os.Lstat(p)
-	if err != nil {
-		return nil, false
+// repairUserConfig gives the user back RustDesk files that an earlier
+// administrator run (TailConnect 0.3.9) left owned by root in the user's
+// folders: settings the user's RustDesk then can't read (so it loses direct
+// access and its password) and log folders. It reports whether it changed
+// anything. Only RustDesk's own files are touched, through folder handles,
+// never following links (see giveBack): this runs as root in folders the
+// user controls.
+func repairUserConfig(uid int) (changed bool) {
+	u, err := user.LookupId(strconv.Itoa(uid))
+	if err != nil || !filepath.IsAbs(u.HomeDir) {
+		return false
 	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	return st, ok
+	gid, _ := strconv.Atoi(u.Gid)
+	if dfd, err := openDir(u.HomeDir, "Library", "Preferences", "com.carriez.RustDesk"); err == nil {
+		changed = giveBack(dfd, uid, gid, func(n string) bool {
+			return strings.HasPrefix(n, "RustDesk") && strings.HasSuffix(n, ".toml")
+		})
+		unix.Close(dfd)
+	}
+	for _, sub := range []string{"option", "password"} {
+		if dfd, err := openDir(u.HomeDir, "Library", "Logs", "RustDesk", sub); err == nil {
+			giveBack(dfd, uid, gid, func(n string) bool { return strings.HasSuffix(n, ".log") })
+			unix.Close(dfd)
+		}
+	}
+	return changed
 }

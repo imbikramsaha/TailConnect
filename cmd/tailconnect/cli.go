@@ -484,11 +484,19 @@ func screenCmd(c *control, args []string) int {
 		return v.Screen, err
 	}
 	show := func(s core.ScreenView) {
+		signIn := "enter RustDesk's password when connecting."
+		if s.PasswordKnown {
+			signIn = "paired devices connect without typing a password."
+		}
 		switch {
-		case s.Configured && s.PasswordKnown:
-			fmt.Println("Screen sharing: RustDesk is set up; paired devices connect without typing a password.")
+		case s.Configured && s.NeedsRepair:
+			fmt.Println("Screen sharing: needs repair. RustDesk can't read settings an earlier TailConnect version saved (run: tailconnect screen setup).")
+		case s.Configured && s.Listening:
+			fmt.Println("Screen sharing: RustDesk is ready; " + signIn)
+		case s.Configured && s.StartsOnDemand && !s.AppRunning:
+			fmt.Println("Screen sharing: RustDesk is ready (it starts when a paired device connects); " + signIn)
 		case s.Configured:
-			fmt.Println("Screen sharing: RustDesk is set up; enter RustDesk's password when connecting.")
+			fmt.Println("Screen sharing: RustDesk is set up but not accepting connections (run: tailconnect screen setup).")
 		case s.RustDeskInstalled:
 			fmt.Println("Screen sharing: RustDesk is installed but not set up for TailConnect (run: tailconnect screen setup).")
 		default:

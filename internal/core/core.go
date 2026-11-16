@@ -102,6 +102,7 @@ type Core struct {
 		running bool
 		err     string
 	}
+	screenHealth screenHealth // cached; see rustDeskHealth
 
 	sshMu   sync.Mutex
 	sshSrv  *sshd.Server
@@ -208,6 +209,13 @@ func (c *Core) Start(ctx context.Context) error {
 	go c.discoveryLoop()
 	go c.alertLoop()
 	go c.updateLoop()
+	go func() {
+		select {
+		case <-time.After(10 * time.Second):
+			c.checkScreenSetup()
+		case <-c.ctx.Done():
+		}
+	}()
 	return nil
 }
 

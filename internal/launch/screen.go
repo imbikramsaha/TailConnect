@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -171,6 +172,27 @@ func OpenRustDesk(port int, password string) error {
 		argv = append(argv, "--password", password)
 	}
 	return start(argv[0], argv[1:]...)
+}
+
+// RustDeskRunning reports whether the RustDesk app runs for this user.
+func RustDeskRunning() bool { return rustDeskRunning() }
+
+// StartRustDesk starts RustDesk in the background (hidden on macOS) if it
+// isn't running. On a Mac without RustDesk's optional system service, it
+// accepts connections only while its app runs.
+func StartRustDesk() error {
+	if rustDeskRunning() {
+		return nil
+	}
+	bin := rustDeskBin()
+	if bin == nil {
+		return errors.New("RustDesk isn't installed")
+	}
+	if runtime.GOOS == "darwin" {
+		// bin is …/RustDesk.app/Contents/MacOS/RustDesk.
+		return start("open", "-g", "-j", filepath.Dir(filepath.Dir(filepath.Dir(bin[0]))))
+	}
+	return start(bin[0], bin[1:]...)
 }
 
 // rustDeskRunning reports whether the RustDesk app (not only its service)

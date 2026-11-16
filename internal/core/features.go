@@ -349,6 +349,13 @@ func (c *Core) RemoteDesktop(ctx context.Context, id string) (string, error) {
 	default:
 		cands = append([]cand{rustdesk}, system...)
 	}
+	// Ask a TailConnect device first: it starts RustDesk if it isn't
+	// running (a Mac's RustDesk listens only while its app runs) and says
+	// how to sign in.
+	password := ""
+	if cands[0].kind == launch.ScreenRustDesk {
+		password = c.peerScreenPassword(ctx, dev)
+	}
 	var missing []string
 	for _, cd := range cands {
 		if !c.remotePortOpen(ctx, dev, cd.port) {
@@ -359,7 +366,7 @@ func (c *Core) RemoteDesktop(ctx context.Context, id string) (string, error) {
 			continue
 		}
 		if cd.kind == launch.ScreenRustDesk {
-			return cd.label, c.openRustDesk(ctx, dev)
+			return cd.label, c.openRustDesk(dev, password)
 		}
 		r, err := c.Forward(ctx, id, cd.port, cd.label, false)
 		if err != nil {
@@ -408,18 +415,28 @@ func (c *Core) SetScreenChoice(id, choice string) error {
 	return err
 }
 
-// openRustDesk opens this computer's RustDesk on a device's RustDesk
-// through a one-shot tunnel, signed in with the password TailConnect set
-// there (fetched from the device after verifying it's really TailConnect).
-func (c *Core) openRustDesk(ctx context.Context, dev store.Device) error {
-	password := ""
-	if dev.Kind == store.KindPeer {
-		if ip, err := c.peerIP(dev); err == nil && c.verifyPeer(ctx, dev, ip) == nil {
-			if si, err := c.agentCli.Screen(ctx, ip); err == nil && si.RustDesk != nil {
-				password = si.RustDesk.Password
-			}
-		}
+// peerScreenPassword asks a paired TailConnect device how to view its
+// screen (which also starts its RustDesk if needed), returning the RustDesk
+// password it set up there, if any — only after verifying the device is
+// really the TailConnect we paired with.
+func (c *Core) peerScreenPassword(ctx context.Context, dev store.Device) string {
+	if dev.Kind != store.KindPeer {
+		return ""
 	}
+	ip, err := c.peerIP(dev)
+	if err != nil || c.verifyPeer(ctx, dev, ip) != nil {
+		return ""
+	}
+	si, err := c.agentCli.Screen(ctx, ip)
+	if err != nil || si.RustDesk == nil {
+		return ""
+	}
+	return si.RustDesk.Password
+}
+
+// openRustDesk connects RustDesk here to dev's RustDesk through a one-shot
+// tunnel, signing in with password if known.
+func (c *Core) openRustDesk(dev store.Device, password string) error {
 	devID := dev.ID
 	port, err := forward.StartOnce(30*time.Second, func(ctx context.Context) (net.Conn, error) {
 		d, ok := c.device(devID)

@@ -56,4 +56,6 @@ func verifySigned(ctx context.Context, p string) error {
 func startInSession(int) {}
 
 // repairUserConfig is only needed on macOS.
-func repairUserConfig(int) {}
+func repairUserConfig(int) bool { return false }
+
+func stopInSession(int) {}

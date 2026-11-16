@@ -9,6 +9,7 @@ on:
     branches: [main]
     paths:
       - internal/rustdesk/**
+      - internal/launch/screen.go
       - .github/workflows/rustdesk-test.yml
   workflow_dispatch:
   schedule:
@@ -44,6 +45,12 @@ jobs:
           if [ "$RUNNER_OS" = macOS ]; then go build -o tc ./cmd/tailconnect
           else CGO_ENABLED=0 go build -o tc$([ "$RUNNER_OS" = Windows ] && echo .exe) ./cmd/tailconnect; fi
 
+      - name: Root-only file-handling tests (macOS / Linux)
+        if: runner.os != 'Windows'
+        run: |
+          go test -c -o rdtest ./internal/rustdesk
+          sudo TAILCONNECT_ROOT_TESTS=1 ./rdtest -test.run Root -test.v
+
       - name: Elevated setup (macOS / Linux)
         if: runner.os != 'Windows'
         run: |
@@ -71,6 +78,36 @@ jobs:
             ls -la "$PREFS"
             # Nothing in the user's RustDesk settings may be left owned by root.
             test -z "$(find "$PREFS" -user root)" || { echo "root-owned files left in $PREFS"; exit 1; }
+            listening() { nc -z -G 2 127.0.0.1 21118 2>/dev/null; }
+            wait_listen() { for i in $(seq 30); do listening && return 0; sleep 1; done; echo "RustDesk isn't listening on 21118"; tail -30 ~/Library/Logs/RustDesk/RustDesk_rCURRENT.log; return 1; }
+            wait_listen
+            grep -q '"passwordSet":true' spec/spec.json.result
+
+            # What TailConnect 0.3.9 left on Macs: RustDesk running with
+            # settings it can't read (so not listening), root-owned log
+            # folders. Plus a hard link to a system file planted where the
+            # repair looks: it must stay root's.
+            pkill -x RustDesk || true; sleep 2
+            sudo chown root "$PREFS/RustDesk2.toml"
+            sudo mkdir -p ~/Library/Logs/RustDesk/option && sudo sh -c "echo x > '$HOME/Library/Logs/RustDesk/option/RustDesk_rCURRENT.log'"
+            sudo sh -c 'echo system > /private/tmp/tc-system-file && chmod 600 /private/tmp/tc-system-file'
+            if ln /private/tmp/tc-system-file "$PREFS/RustDesk9.toml"; then planted=1; else planted=0; echo "hard link refused here"; fi
+            open -g -j -a RustDesk; sleep 8
+            ! listening || { echo "expected RustDesk not to listen with unreadable settings"; exit 1; }
+
+            printf '{"password":"TcCiTest1234567890ab","lock":true,"uid":%s}' "$uid" > spec/spec3.json && chmod 600 spec/spec3.json
+            sudo GITHUB_TOKEN="$GITHUB_TOKEN" ./tc rustdesk-admin "$PWD/spec/spec3.json"; cat spec/spec3.json.result; echo
+            grep -q '"passwordSet":true' spec/spec3.json.result
+            wait_listen
+            ls -la "$PREFS" ~/Library/Logs/RustDesk/option
+            test "$(stat -f %u /private/tmp/tc-system-file)" = 0 || { echo "system file handed to the user"; exit 1; }
+            [ $planted = 1 ] && rm "$PREFS/RustDesk9.toml"
+            test -z "$(find "$PREFS" ~/Library/Logs/RustDesk/option -user root)" || { echo "root-owned files left"; exit 1; }
+
+            # Quit RustDesk: TailConnect starts it when a device connects.
+            pkill -x RustDesk || true; sleep 2
+            go test -c -o rdtest ./internal/rustdesk
+            TAILCONNECT_LIVE_RUSTDESK=1 ./rdtest -test.run StartOnDemandLive -test.v
           fi
           # Running again (e.g. "Set up again") keeps working on an installed RustDesk.
           printf '{"password":"TcCiTest1234567890ab","lock":false,"uid":%s}' "$uid" > spec/spec2.json && chmod 600 spec/spec2.json

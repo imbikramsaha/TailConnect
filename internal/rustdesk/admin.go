@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -49,21 +48,17 @@ func AdminMain(specPath string) error {
 	if !filepath.IsAbs(specPath) {
 		return errors.New("spec path must be absolute")
 	}
-	// Never follow links: this runs as an administrator on a file in the
-	// user's temporary folder.
-	fi, err := os.Lstat(specPath)
-	if err != nil || !fi.Mode().IsRegular() || fi.Size() > 4096 {
+	// This runs as an administrator on a file in the user's temporary
+	// folder: work through a handle on that folder, never following links.
+	dir, err := openSpecDir(filepath.Dir(specPath))
+	if err != nil {
 		return errors.New("bad spec file")
 	}
-	f, err := openNoFollow(specPath)
+	defer dir.close()
+	name := filepath.Base(specPath)
+	b, err := dir.read(name, 4096) // removed after reading: it holds the password
 	if err != nil {
-		return err
-	}
-	b, err := io.ReadAll(io.LimitReader(f, 4096))
-	f.Close()
-	_ = os.Remove(specPath) // it holds the password
-	if err != nil {
-		return err
+		return errors.New("bad spec file")
 	}
 	var spec Spec
 	if err := json.Unmarshal(b, &spec); err != nil {
@@ -79,14 +74,8 @@ func AdminMain(specPath string) error {
 	defer cancel()
 	res := Apply(ctx, spec)
 	out, _ := json.Marshal(res)
-	// O_EXCL: never write through something planted at the result path.
-	rf, err := os.OpenFile(specPath+".result", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
+	if err := dir.create(name+".result", out); err != nil {
 		return fmt.Errorf("writing result: %w", err)
 	}
-	_, err = rf.Write(out)
-	if cerr := rf.Close(); err == nil {
-		err = cerr
-	}
-	return err
+	return nil
 }
