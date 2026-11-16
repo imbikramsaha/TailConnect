@@ -158,18 +158,8 @@ func (c *Core) RemoveDevice(ctx context.Context, id string) error {
 		return errors.New("unknown device")
 	}
 	c.Disconnect(id)
-	if dev.Kind == store.KindPeer {
-		if p, ok := c.peer(dev.NodeID); ok && p.IP != "" {
-			uctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			if err := c.agentCli.Unpair(uctx, p.IP); err != nil {
-				c.logs.Printf("unpair %s: %v", dev.Name, err)
-			}
-			cancel()
-		}
-		if c.IsTrusted(dev.NodeID) {
-			_ = c.untrust(dev.NodeID)
-		}
-	}
+	// Forget the device and block auto-pairing *first*: otherwise discovery
+	// can see it untrusted (after the unpair below) and pair it again.
 	err := c.store.Update(func(st *store.State) error {
 		st.Devices = slices.DeleteFunc(st.Devices, func(d store.Device) bool { return d.ID == id })
 		if dev.NodeID != "" && !slices.Contains(st.Ignored, dev.NodeID) {
@@ -183,6 +173,18 @@ func (c *Core) RemoveDevice(ctx context.Context, id string) error {
 	c.mu.Lock()
 	delete(c.outgoing, dev.NodeID)
 	c.mu.Unlock()
+	if dev.Kind == store.KindPeer {
+		if c.IsTrusted(dev.NodeID) {
+			_ = c.untrust(dev.NodeID)
+		}
+		if p, ok := c.peer(dev.NodeID); ok && p.IP != "" {
+			uctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			if err := c.agentCli.Unpair(uctx, p.IP); err != nil {
+				c.logs.Printf("unpair %s: %v", dev.Name, err)
+			}
+			cancel()
+		}
+	}
 	_ = c.known.Forget(dev.Alias)
 	c.logs.Session.Printf("removed device %q", dev.Name)
 	c.events.Notify()

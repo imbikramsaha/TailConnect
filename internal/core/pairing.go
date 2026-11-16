@@ -643,10 +643,17 @@ func displayName(p peerInfo) string {
 	return SafeName(shortName(p.DNSName))
 }
 
+var errRemoved = errors.New("device was removed")
+
 func (c *Core) savePeerDevice(p peerInfo, resp *agent.PairResponse) error {
 	user, _ := SafeUser(resp.User)
 	home, _ := SafeHome(resp.Home)
 	err := c.store.Update(func(st *store.State) error {
+		// A pairing that was already in flight when the user removed the
+		// device must not bring it back.
+		if slices.Contains(st.Ignored, p.NodeID) {
+			return errRemoved
+		}
 		port := resp.SSHPort
 		if port <= 0 || port > 65535 {
 			port = 22
