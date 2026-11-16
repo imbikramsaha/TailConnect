@@ -54,5 +54,6 @@ Tailscale identifies machines, not the programs on them: with the Tailscale app 
 - Preview builds are ad-hoc signed (macOS) and unsigned (Windows); first launch shows an OS warning. Updates are still protected by the release signature.
 - Web apps you open through TailConnect run at `http://localhost:<port>` in your browser, and browsers share `localhost` cookies across ports (as with `ssh -L` or VS Code port forwarding). Only open web apps from devices you trust.
 - Forwarded ports listen on `127.0.0.1`, so other programs and OS users on this computer can reach them while they're open (as with `ssh -L`).
+- RustDesk's *direct IP access* (used for screen sharing) is RustDesk's own listener on every network the computer is on, protected by RustDesk's password. Through TailConnect it travels inside the encrypted tunnel; set a strong permanent password, and block TCP 21118 in the firewall for other networks if you don't need them.
 - Revoking a device ends its sessions and tunnels. Processes it deliberately detached (`nohup`/`setsid` on macOS/Linux; scheduled tasks or WMI on Windows) keep running, as with OpenSSH. A device with full access can always leave something behind as your user — revoke and review if you stop trusting one.
 - Devices still on TailConnect 0.3.6 or earlier don't sign their answers; their answers are accepted as before until they update.

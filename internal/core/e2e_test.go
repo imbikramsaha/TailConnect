@@ -26,6 +26,7 @@ import (
 	"tailscale.com/types/logger"
 
 	"github.com/imbikramsaha/tailconnect/internal/agent"
+	"github.com/imbikramsaha/tailconnect/internal/launch"
 	"github.com/imbikramsaha/tailconnect/internal/logx"
 	"github.com/imbikramsaha/tailconnect/internal/sshkeys"
 	"github.com/imbikramsaha/tailconnect/internal/sshx"
@@ -53,6 +54,9 @@ func startControl(t *testing.T, sameUser bool) string {
 	t.Cleanup(control.HTTPTestServer.Close)
 	return control.HTTPTestServer.URL
 }
+
+// testWindowed makes the next cores act as desktop (not headless) apps.
+var testWindowed bool
 
 func newCore(t *testing.T, controlURL, name string, autoTrust bool) *Core {
 	t.Helper()
@@ -103,7 +107,7 @@ func newCoreWith(t *testing.T, controlURL, name string, autoTrust bool, system *
 		DiscoveryInterval: 250 * time.Millisecond,
 		ProbeTailConnect:  time.Second,
 		ProbeOther:        time.Second,
-		Headless:          true,
+		Headless:          !testWindowed,
 		InboxDir:          filepath.Join(dir, "inbox"),
 	})
 	if err != nil {
@@ -743,4 +747,52 @@ func TestRevokeStaysRevoked(t *testing.T) {
 	if b.IsTrusted(aNode) {
 		t.Fatal("revoked own-account device was auto-paired again")
 	}
+}
+
+func TestScreenSharingFindsRustDesk(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+	// Never open a real viewer on the machine running the tests.
+	if ok, _ := launch.ScreenViewer(launch.ScreenRustDesk); ok {
+		t.Skip("RustDesk is installed here; this test would open it")
+	}
+	for _, p := range []string{"5900", "3389", "21118"} {
+		if c, err := net.DialTimeout("tcp", "127.0.0.1:"+p, 300*time.Millisecond); err == nil {
+			c.Close()
+			t.Skipf("port %s is in use here; this test would open a real viewer", p)
+		}
+	}
+	url := startControl(t, true)
+	testWindowed = true // screen sharing needs a desktop app
+	a := newCore(t, url, "alpha", true)
+	testWindowed = false
+	b := newCore(t, url, "bravo", true)
+	dumpOnFail = []*Core{a, b}
+	waitFor(t, "auto-pair", 60*time.Second, func() bool {
+		d, ok := deviceNamed(a, "bravo")
+		return ok && d.TrustsUs && d.TrustedByUs && d.Online
+	})
+	devB, _ := deviceNamed(a, "bravo")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Nothing is set up on bravo: explain how, including RustDesk.
+	_, err := a.RemoteDesktop(ctx, devB.ID)
+	if err == nil || !strings.Contains(err.Error(), "isn't enabled") || !strings.Contains(err.Error(), "RustDesk") {
+		t.Fatalf("nothing enabled: %v", err)
+	}
+	t.Logf("nothing enabled -> %v", err)
+	// RustDesk with direct IP access on bravo (its port, through the tunnel),
+	// but no RustDesk here: say exactly what's missing on this side.
+	ln, err := net.Listen("tcp", "127.0.0.1:21118")
+	if err != nil {
+		t.Skipf("can't listen on 21118: %v", err)
+	}
+	defer ln.Close()
+	_, err = a.RemoteDesktop(ctx, devB.ID)
+	if err == nil || !strings.Contains(err.Error(), "needs a viewer") || !strings.Contains(err.Error(), "RustDesk: install RustDesk") {
+		t.Fatalf("RustDesk on the other side: %v", err)
+	}
+	t.Logf("RustDesk there, not here -> %v", err)
 }

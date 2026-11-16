@@ -95,7 +95,8 @@ To connect with someone else's computer, they click **Pair** on yours and you ap
 - **One-click Terminal, VS Code, Cursor, Windsurf and Zed** — TailConnect serves SSH itself, so there's nothing to enable on the other computer.
 - **Running services** — Jupyter, Ollama, ComfyUI or your dev server are detected automatically; one click opens them in your browser.
 - **Custom apps** with launch scripts and ready-made templates for JupyterLab, Ollama, Open WebUI, ComfyUI, Stable Diffusion, code-server, TensorBoard, Streamlit and vLLM.
-- **Screen sharing**, **file transfer**, **clipboard sharing** and **Wake-on-LAN** for sleeping machines.
+- **Screen sharing** through your private network with [RustDesk](https://rustdesk.com) (works between every system, Windows Home included) or the built-in Screen Sharing / Remote Desktop — no RustDesk servers or open ports needed.
+- **File transfer**, **clipboard sharing** and **Wake-on-LAN** for sleeping machines.
 - **Works with your tools** — every device gets an alias, so `ssh tc-desktop`, `scp`, `rsync` and JetBrains Gateway just work.
 
 ### Know what's happening
@@ -195,6 +196,18 @@ No. Connections are end-to-end encrypted WireGuard tunnels between your devices.
 <summary><b>How is this different from SSH, VS Code Remote or Tailscale alone?</b></summary>
 <br>
 Tailscale gives your devices a private network. TailConnect builds on it: devices find and pair with each other, terminals and editors open in one click with nothing to configure on the other machine, services are detected and forwarded for you, and you get resource monitoring, file and clipboard sharing, screen sharing and Wake-on-LAN in one place.
+</details>
+
+<details>
+<summary><b>How do I set up screen sharing?</b></summary>
+<br>
+
+Click **Screen** on a device. TailConnect connects through your private network and opens the best viewer available:
+
+1. **RustDesk** (recommended — any system to any system): install [RustDesk](https://rustdesk.com) on both computers and, on the one you want to see, turn on **Settings → Security → Enable direct IP access** and set a permanent password. TailConnect connects RustDesk directly through the tunnel; no RustDesk servers are involved.
+2. **Built-in tools**: macOS **Screen Sharing** (System Settings → General → Sharing), or **Remote Desktop** on Windows Pro/Enterprise and Linux. To view a Windows PC from a Mac, install Microsoft's free **Windows App**.
+
+If something is missing, TailConnect tells you exactly what to turn on or install.
 </details>
 
 <details>

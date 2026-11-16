@@ -367,7 +367,7 @@ function viewDevice() {
     return `<button class="app-tile" data-act="launch" data-id="${h(d.id)}" data-app="${h(b.id)}" ${dis ? "disabled" : ""} title="${h(!b.available ? b.name + " was not found on this computer" : "Open " + b.name + " on " + d.name)}">
       <span class="ico">${icon(APP_ICON[b.id] || "code")}</span><span class="t">${h(b.name)}</span><span class="s">${h(sub)}</span></button>`;
   }).join("");
-  const extraTiles = portsOK ? `<button class="app-tile" data-act="remote-desktop" data-id="${h(d.id)}" ${!d.online ? "disabled" : ""} title="Screen Sharing / Remote Desktop">
+  const extraTiles = portsOK ? `<button class="app-tile" data-act="remote-desktop" data-id="${h(d.id)}" ${!d.online ? "disabled" : ""} title="RustDesk, Screen Sharing or Remote Desktop">
       <span class="ico">${icon("screen")}</span><span class="t">Screen</span><span class="s">${d.os === "darwin" ? "Screen Sharing" : d.os === "windows" ? "Remote Desktop" : "RDP / VNC"}</span></button>` : "";
 
   return `
@@ -1102,8 +1102,13 @@ const actions = {
     toast(`Wake signal sent via ${r.via}. It can take a minute to come online.`);
   }),
   "remote-desktop": el => run("rd:" + el.dataset.id, async () => {
-    const r = await api.post(`/api/devices/${enc(el.dataset.id)}/remote-desktop`);
-    toast(`Opening ${r.kind}…`);
+    try {
+      const r = await api.post(`/api/devices/${enc(el.dataset.id)}/remote-desktop`);
+      toast(`Opening ${r.kind}…`);
+    } catch (e) {
+      // Setup steps are too long for a toast.
+      openDialog("Screen sharing", "", `<p style="margin:0;line-height:1.5">${h(e.message)}</p>`, "OK", async () => {}, { noCancel: true });
+    }
   }),
   diagnose: el => {
     const d = devById(el.dataset.id);

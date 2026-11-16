@@ -328,39 +328,41 @@ func (c *Core) RemoteDesktop(ctx context.Context, id string) (string, error) {
 	if err := c.ensureConnected(ctx, id); err != nil {
 		return "", err
 	}
+	// RustDesk first when both ends have it (it works between every pair of
+	// systems, Windows Home included), then the system's own remote desktop.
 	type cand struct {
-		port int
-		kind string
+		port        int
+		kind, label string
 	}
-	cands := []cand{{3389, "rdp"}, {5900, "vnc"}}
+	cands := []cand{{21118, launch.ScreenRustDesk, "RustDesk"}, {3389, launch.ScreenRDP, "Remote Desktop"}, {5900, launch.ScreenVNC, "VNC"}}
 	if dev.OS == "darwin" {
-		cands = []cand{{5900, "vnc"}}
+		cands = []cand{cands[0], {5900, launch.ScreenVNC, "Screen Sharing"}}
 	}
+	var missing []string
 	for _, cd := range cands {
 		if !c.remotePortOpen(ctx, dev, cd.port) {
 			continue
 		}
-		label := "Remote Desktop"
-		if cd.kind == "vnc" {
-			label = "Screen Sharing"
+		if ok, hint := launch.ScreenViewer(cd.kind); !ok {
+			missing = append(missing, cd.label+": "+hint)
+			continue
 		}
-		r, err := c.Forward(ctx, id, cd.port, label, false)
+		r, err := c.Forward(ctx, id, cd.port, cd.label, false)
 		if err != nil {
 			return "", err
 		}
-		if cd.kind == "rdp" {
-			err = launch.OpenRDP("127.0.0.1", r.LocalPort)
-		} else {
-			err = launch.OpenVNC("127.0.0.1", r.LocalPort)
-		}
-		return label, err
+		return cd.label, launch.OpenScreen(cd.kind, r.LocalPort)
 	}
-	hint := "turn on Remote Desktop in Settings → System → Remote Desktop (Windows Pro) or Settings → System → Remote Desktop (GNOME)"
+	if len(missing) > 0 {
+		return "", fmt.Errorf("%s is ready for screen sharing, but this computer needs a viewer. %s", dev.Name, strings.Join(missing, ". Or "))
+	}
+	rustdesk := "install RustDesk on both computers and turn on its Settings → Security → Enable direct IP access (works on every system, including Windows Home)"
+	hint := "turn on Remote Desktop (GNOME: Settings → System → Remote Desktop), or " + rustdesk
 	switch dev.OS {
 	case "darwin":
-		hint = "turn on System Settings → General → Sharing → Screen Sharing"
+		hint = "turn on System Settings → General → Sharing → Screen Sharing, or " + rustdesk
 	case "windows":
-		hint = "turn on Settings → System → Remote Desktop (Windows Pro/Enterprise)"
+		hint = "turn on Settings → System → Remote Desktop (Windows Pro/Enterprise), or " + rustdesk
 	}
 	return "", fmt.Errorf("screen sharing isn't enabled on %s: %s", dev.Name, hint)
 }

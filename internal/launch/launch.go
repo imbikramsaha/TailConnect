@@ -299,34 +299,6 @@ func Reveal(p string) error {
 	}
 }
 
-// OpenRDP opens a Remote Desktop client for host:port.
-func OpenRDP(host string, port int) error {
-	addr := fmt.Sprintf("%s:%d", host, port)
-	switch runtime.GOOS {
-	case "windows":
-		return start("mstsc", "/v:"+addr)
-	case "darwin":
-		// Handled by Microsoft's "Windows App" / Remote Desktop.
-		return start("open", "rdp://full%20address=s:"+addr)
-	default:
-		if p, err := LookPath("remmina"); err == nil {
-			return start(p, "-c", "rdp://"+addr)
-		}
-		return start("xdg-open", "rdp://"+addr)
-	}
-}
-
-// OpenVNC opens a VNC client (Screen Sharing on macOS) for host:port.
-func OpenVNC(host string, port int) error {
-	u := fmt.Sprintf("vnc://%s:%d", host, port)
-	if runtime.GOOS == "linux" {
-		if p, err := LookPath("remmina"); err == nil {
-			return start(p, "-c", u)
-		}
-	}
-	return OpenURL(u)
-}
-
 // trustedFile reports whether an executable found outside PATH is safe to
 // run: not writable by others, in a directory not writable by others, and
 // owned by root or the current user (Unix; always true elsewhere).
