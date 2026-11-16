@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -51,7 +52,7 @@ func TestEncryptExistingKeyAndSign(t *testing.T) {
 	if !strings.HasPrefix(string(raw), sealHeader) {
 		t.Fatal("key not encrypted")
 	}
-	if fi, _ := os.Stat(key); fi.Mode().Perm() != 0o600 {
+	if fi, _ := os.Stat(key); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %v", fi.Mode().Perm())
 	}
 	sums := filepath.Join(dir, "SHA256SUMS")
@@ -63,8 +64,10 @@ func TestEncryptExistingKeyAndSign(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Refuses a key file other users can read.
-	os.Chmod(key, 0o644)
-	if err := run([]string{"sign", key, sums}); err == nil {
-		t.Fatal("signed with a world-readable key")
+	if runtime.GOOS != "windows" {
+		os.Chmod(key, 0o644)
+		if err := run([]string{"sign", key, sums}); err == nil {
+			t.Fatal("signed with a world-readable key")
+		}
 	}
 }

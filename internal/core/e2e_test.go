@@ -63,6 +63,9 @@ func newCore(t *testing.T, controlURL, name string, autoTrust bool) *Core {
 // daemon (the "Tailscale app" mode) instead of an embedded node.
 func newCoreWith(t *testing.T, controlURL, name string, autoTrust bool, system *local.Client) *Core {
 	t.Helper()
+	// CI runners (Windows) run as an elevated administrator, where built-in
+	// SSH otherwise refuses to start.
+	t.Setenv("TAILCONNECT_ALLOW_ELEVATED_SSH", "1")
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "state.json"))
 	if err != nil {

@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"golang.org/x/crypto/chacha20poly1305"
@@ -148,7 +149,8 @@ func run(args []string) error {
 
 // loadKey reads a key file, asking for the passphrase if it is encrypted.
 func loadKey(path string) (ed25519.PrivateKey, error) {
-	if fi, err := os.Stat(path); err == nil && fi.Mode().Perm()&0o077 != 0 {
+	// (Windows has no Unix permission bits; ACLs protect the user profile.)
+	if fi, err := os.Stat(path); err == nil && runtime.GOOS != "windows" && fi.Mode().Perm()&0o077 != 0 {
 		return nil, fmt.Errorf("%s is readable by other users; run: chmod 600 %s", path, path)
 	}
 	raw, err := os.ReadFile(path)
