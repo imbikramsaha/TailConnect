@@ -41,6 +41,11 @@ func dirNames(dfd int) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A duplicate shares the read position: start from the top every time.
+	if _, err := unix.Seek(nfd, 0, 0); err != nil {
+		unix.Close(nfd)
+		return nil, err
+	}
 	f := os.NewFile(uintptr(nfd), "dir")
 	defer f.Close()
 	return f.Readdirnames(-1)

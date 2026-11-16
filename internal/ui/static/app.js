@@ -776,7 +776,7 @@ function viewSettings(tab) {
   } else if (tab === "screen") {
     const sc = S.screen || {};
     const mac = S.self.os === "darwin";
-    const signIn = sc.passwordKnown ? "your devices connect without a password" : "enter RustDesk's password when connecting";
+    const signIn = sc.passwordKnown ? "your devices sign in automatically" : "enter RustDesk's password when connecting";
     let status, warn = "";
     if (sc.running) status = `<span class="spinner sm"></span> Setting up — confirm the administrator prompt`;
     else if (!sc.configured) status = sc.rustdeskInstalled ? "Installed, not set up for TailConnect yet" : "Not installed";
@@ -784,7 +784,7 @@ function viewSettings(tab) {
       status = "Needs repair";
       warn = "RustDesk can't read settings an earlier TailConnect version saved, so your devices can't connect. Click <b>Repair</b> — it asks for your administrator password once.";
     } else if (sc.listening) status = "Ready — " + signIn;
-    else if (sc.startsOnDemand && !sc.appRunning) status = "Ready — RustDesk starts when one of your devices connects; " + signIn;
+    else if (sc.startsOnDemand && !sc.appRunning) status = "Ready — RustDesk opens when a device connects; " + signIn;
     else {
       status = "Not accepting connections";
       warn = `RustDesk is ${sc.appRunning ? "running, but not accepting direct connections" : "not running"}, so your devices can't connect. Click <b>Set up again</b> to fix it.` +

@@ -132,3 +132,21 @@ func TestClearRootFilesRoot(t *testing.T) {
 		t.Error("linked folder opened")
 	}
 }
+
+// Listing the same open folder twice sees every entry both times.
+func TestDirNamesRepeatable(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"a", "b", "c"} {
+		os.WriteFile(filepath.Join(dir, n), nil, 0o600)
+	}
+	fd, err := openDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Close(fd)
+	for i := 0; i < 2; i++ {
+		if names, err := dirNames(fd); err != nil || len(names) != 3 {
+			t.Fatalf("listing %d: %v, %v", i+1, names, err)
+		}
+	}
+}
