@@ -46,6 +46,16 @@ jobs:
       - name: Test
         if: runner.os == 'Windows'
         run: go test -count=1 -timeout 20m ./...
+      - name: Check install.sh
+        if: runner.os == 'Linux'
+        run: shellcheck -s sh scripts/install.sh
+      - name: Check install.ps1
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $e = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD/scripts/install.ps1", [ref]$null, [ref]$e) | Out-Null
+          if ($e.Count) { $e | ForEach-Object { Write-Error $_.ToString() }; exit 1 }
 
   check-tag:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -157,6 +167,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -165,6 +177,27 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Stable download names and install scripts
+        # README links use releases/latest/download/<stable name>.
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          one() { set -- $1; [ -f "$1" ] || { echo "missing $1" >&2; exit 1; }; echo "$1"; }
+          cp "$(one "dist/TailConnect-$V-macos.dmg")"            dist/TailConnect-macos.dmg
+          cp "$(one "dist/TailConnect-$V-windows-setup.exe")"    dist/TailConnect-windows-setup.exe
+          cp "$(one "dist/TailConnect-$V-windows-amd64.zip")"    dist/TailConnect-windows-amd64.zip
+          cp "$(one "dist/tailconnect_*_amd64.deb")"             dist/tailconnect_linux_amd64.deb
+          cp "$(one "dist/tailconnect_*_arm64.deb")"             dist/tailconnect_linux_arm64.deb
+          cp "$(one "dist/tailconnect-*.x86_64.rpm")"            dist/tailconnect_linux_x86_64.rpm
+          cp "$(one "dist/tailconnect-*.aarch64.rpm")"           dist/tailconnect_linux_aarch64.rpm
+          cp "$(one "dist/tailconnect_*_linux_amd64.tar.gz")"    dist/tailconnect_linux_amd64.tar.gz
+          cp "$(one "dist/tailconnect_*_linux_arm64.tar.gz")"    dist/tailconnect_linux_arm64.tar.gz
+          cp scripts/install.sh scripts/install.ps1 dist/
+      - name: Provenance for install scripts
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: |
+            dist/install.sh
+            dist/install.ps1
       - name: Checksums and Homebrew cask
         run: |
           cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS && cd ..
@@ -176,4 +209,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
-            --draft --prerelease --generate-notes --title "TailConnect ${GITHUB_REF_NAME#v}"
+            --draft --generate-notes --title "TailConnect ${GITHUB_REF_NAME#v}"

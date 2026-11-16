@@ -1,0 +1,65 @@
+name: Install test
+
+# Runs the README's one-line install commands on clean machines against the
+# published release, so the documented install path is always known to work.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+  schedule:
+    - cron: "41 5 * * 3"
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Install (README command)
+        shell: powershell
+        run: irm https://github.com/imbikramsaha/TailConnect/releases/latest/download/install.ps1 | iex
+      - name: Check
+        shell: powershell
+        run: |
+          $dir = "$env:LOCALAPPDATA\Programs\TailConnect"
+          if (-not (Test-Path "$dir\TailConnectApp.exe")) { throw "TailConnectApp.exe not installed" }
+          & "$dir\tailconnect.exe" version
+          if ($LASTEXITCODE -ne 0) { throw "tailconnect.exe failed" }
+          Get-Process TailConnectApp -ErrorAction SilentlyContinue | Stop-Process -Force
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - name: Install (README command)
+        run: curl -fsSL https://github.com/imbikramsaha/TailConnect/releases/latest/download/install.sh | sh
+      - name: Check
+        run: |
+          APP=/Applications/TailConnect.app
+          [ -d "$APP" ] || APP="$HOME/Applications/TailConnect.app"
+          codesign --verify --deep --strict "$APP"
+          "$APP/Contents/MacOS/tailconnect" version
+          pkill -x tailconnect || true
+
+  linux:
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Install (README command)
+        run: curl -fsSL https://github.com/imbikramsaha/TailConnect/releases/latest/download/install.sh | sh
+      - name: Check
+        run: |
+          dpkg -s tailconnect | grep -E '^(Status|Version)'
+          tailconnect version
+          test -x /usr/lib/tailconnect/tailconnect-window
+
+  fedora:
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - name: Install (README command)
+        run: curl -fsSL https://github.com/imbikramsaha/TailConnect/releases/latest/download/install.sh | sh
+      - name: Check
+        run: rpm -q tailconnect && tailconnect version

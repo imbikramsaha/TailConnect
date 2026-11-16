@@ -7,6 +7,43 @@ Think of it as NVIDIA Sync for every computer you own.
 > **Status:** Phase 1 (device access) — preview for macOS, Windows and Linux.
 > Phase 2 adds browsing other devices' files directly in Finder / File Explorer.
 
+## Download
+
+**One click:**
+
+| macOS 13+ (Apple Silicon & Intel) | Windows 10/11 | Linux (x64 / ARM) |
+|:---:|:---:|:---:|
+| [**⬇ Download for Mac**](https://github.com/imbikramsaha/TailConnect/releases/latest/download/TailConnect-macos.dmg) | [**⬇ Download for Windows**](https://github.com/imbikramsaha/TailConnect/releases/latest/download/TailConnect-windows-setup.exe) | [.deb x64](https://github.com/imbikramsaha/TailConnect/releases/latest/download/tailconnect_linux_amd64.deb) · [.deb ARM](https://github.com/imbikramsaha/TailConnect/releases/latest/download/tailconnect_linux_arm64.deb)<br>[.rpm x64](https://github.com/imbikramsaha/TailConnect/releases/latest/download/tailconnect_linux_x86_64.rpm) · [.rpm ARM](https://github.com/imbikramsaha/TailConnect/releases/latest/download/tailconnect_linux_aarch64.rpm) |
+
+**Or one command:**
+
+macOS and Linux (Terminal):
+
+```sh
+curl -fsSL https://github.com/imbikramsaha/TailConnect/releases/latest/download/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://github.com/imbikramsaha/TailConnect/releases/latest/download/install.ps1 | iex
+```
+
+The commands detect your system, download the right file, **verify its checksum** (and TailConnect's release signature wherever OpenSSL 3 is available — most Linux systems, Macs with Homebrew, Windows with Git), install it, and start TailConnect. No administrator rights are needed on Windows; on Linux the package manager asks for your password.
+
+<details>
+<summary>Other ways to install</summary>
+
+- **Homebrew (macOS):** `brew tap imbikramsaha/tap && brew trust imbikramsaha/tap && brew install --cask tailconnect`
+- **Windows portable zip:** [TailConnect-windows-amd64.zip](https://github.com/imbikramsaha/TailConnect/releases/latest/download/TailConnect-windows-amd64.zip)
+- **Linux, any distribution (no root):** [x64 .tar.gz](https://github.com/imbikramsaha/TailConnect/releases/latest/download/tailconnect_linux_amd64.tar.gz) · [ARM .tar.gz](https://github.com/imbikramsaha/TailConnect/releases/latest/download/tailconnect_linux_arm64.tar.gz) — or the `install.sh` command above, which falls back to this automatically
+- **A specific version:** all files are on the [Releases page](https://github.com/imbikramsaha/TailConnect/releases); the install commands accept `TAILCONNECT_VERSION=0.3.1`
+- **Check a download yourself:** `gh attestation verify <file> --repo imbikramsaha/TailConnect` proves it was built by this repository's CI.
+
+</details>
+
+> First launch of a preview build: on **macOS**, if you downloaded the DMG in a browser, right-click TailConnect → **Open** → **Open** once. On **Windows**, SmartScreen may show **More info → Run anyway**. (The install commands avoid both prompts.)
+
 ## How it works
 
 1. **Install** TailConnect on two or more computers.
@@ -38,47 +75,13 @@ There's no Tailscale app to install — TailConnect embeds its own Tailscale nod
 | **Activity log & reports** | See recent sessions, pairings and changes; "Report a problem" zips logs locally for a bug report. |
 | **Self-hosting** | Point it at a [Headscale](https://headscale.net) server instead of Tailscale's. |
 
-## Install
+## After installing
 
-### macOS (13 Ventura or later, Apple Silicon or Intel)
-
-```sh
-brew tap imbikramsaha/tap
-brew trust imbikramsaha/tap        # Homebrew asks you to trust third-party taps once
-brew install --cask tailconnect
-```
-
-or download `TailConnect-<version>-macos.dmg` from [Releases](https://github.com/imbikramsaha/TailConnect/releases) and drag **TailConnect** to **Applications**. It appears in the menu bar and updates itself.
-
-Preview builds are not notarized yet: the first time, right-click TailConnect → **Open** → **Open**.
-
-Nothing else to enable: other devices reach your Mac through TailConnect's built-in SSH. (For screen sharing, turn on **System Settings → General → Sharing → Screen Sharing**.)
-
-The Homebrew cask also installs the `tailconnect` command; with the DMG, link it yourself:
-
-```sh
-sudo ln -sf /Applications/TailConnect.app/Contents/MacOS/tailconnect /usr/local/bin/tailconnect
-```
-
-### Windows 10/11
-
-Download `TailConnect-<version>-windows-setup.exe` from [Releases](https://github.com/imbikramsaha/TailConnect/releases) and run it — it installs for your user only (no administrator prompt), adds TailConnect to the Start menu and the `tailconnect` command to your PATH, and updates itself. A portable zip is also available. Until the builds are code-signed, SmartScreen may ask you to click **More info → Run anyway**.
-
-### Linux
-
-```sh
-sudo apt install ./tailconnect_<version>_amd64.deb     # Debian/Ubuntu
-sudo dnf install ./tailconnect-<version>.x86_64.rpm    # Fedora/RHEL
-```
-
-Packages for amd64 and arm64, plus a `.tar.gz`. The native window needs WebKitGTK 4.1 (`libwebkit2gtk-4.1-0`, installed automatically as a recommended package); without it TailConnect opens in your browser. On GNOME, the tray icon needs the *AppIndicator* extension (preinstalled on Ubuntu).
-
-### Servers / headless Linux
-
-```sh
-tailconnect --headless            # prints a sign-in URL
-tailconnect --headless --authkey tskey-auth-…   # unattended
-```
+- **macOS:** TailConnect lives in the menu bar. For screen sharing *to* a Mac, turn on **System Settings → General → Sharing → Screen Sharing**. The install command also adds the `tailconnect` command.
+- **Windows:** TailConnect lives in the system tray and the Start menu; `tailconnect` is on your PATH in new terminals.
+- **Linux:** the native window needs WebKitGTK 4.1 (installed automatically with the .deb/.rpm); without it TailConnect opens in your browser. On GNOME, the tray icon needs the *AppIndicator* extension (preinstalled on Ubuntu).
+- **Servers / headless Linux:** run `tailconnect --headless` (prints a sign-in URL) or `tailconnect --headless --authkey-file /path/to/key` for unattended setup.
+- **Uninstall:** Windows *Settings → Apps*, `brew uninstall --cask tailconnect`, or drag the app to the Trash (macOS); on Linux run `tailconnect cleanup` then remove the package.
 
 ## Command line
 

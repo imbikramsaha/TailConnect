@@ -24,7 +24,7 @@ echo "==> Downloading assets of draft $TAG to verify checksums locally"
 gh release download "$TAG" --repo "$REPO" --dir "$WORK"
 (cd "$WORK" && grep -v ' SHA256SUMS' SHA256SUMS | shasum -a 256 -c -)
 echo "==> Checking build provenance (built by this repository's CI)"
-for f in "$WORK"/TailConnect-* "$WORK"/tailconnect[-_]*; do
+for f in "$WORK"/TailConnect-* "$WORK"/tailconnect[-_]* "$WORK"/install.sh "$WORK"/install.ps1; do
   [[ "$f" == *.rb ]] && continue
   gh attestation verify "$f" --repo "$REPO" >/dev/null || { echo "no valid provenance for $(basename "$f")" >&2; exit 1; }
   echo "   ok $(basename "$f")"
@@ -39,5 +39,11 @@ go run ./tools/relsign sign "$KEY" "$WORK/SHA256SUMS"
 PUB=$(grep -A1 'var ReleaseKeys' internal/update/update.go | tail -1 | tr -d '\t",')
 go run ./tools/relsign verify "$PUB" "$WORK/SHA256SUMS" "$WORK/SHA256SUMS.sig"
 gh release upload "$TAG" --repo "$REPO" "$WORK/SHA256SUMS.sig"
-gh release edit "$TAG" --repo "$REPO" --draft=false
+# Pre-release tags (v1.2.3-rc.1) stay pre-releases; others become "latest"
+# so the README's releases/latest/download links point at them.
+if [[ "$TAG" == *-* ]]; then
+  gh release edit "$TAG" --repo "$REPO" --draft=false --prerelease
+else
+  gh release edit "$TAG" --repo "$REPO" --draft=false --prerelease=false --latest
+fi
 echo "Published $TAG. Update the Homebrew tap with the release's tailconnect.rb."
