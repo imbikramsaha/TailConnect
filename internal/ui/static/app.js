@@ -666,7 +666,7 @@ function viewOnboarding() {
     <div class="steps">
       <div class="step"><b>1</b><div><b>Sign in</b> with Google, Microsoft, GitHub or Apple via Tailscale. A free account is created if you don't have one.</div></div>
       <div class="step"><b>2</b><div><b>Install TailConnect on your other devices</b> and sign in with the same account.</div></div>
-      <div class="step"><b>3</b><div>They <b>pair automatically</b> and show up here, ready for one-click Terminal, VS Code, Cursor and port forwards.</div></div>
+      <div class="step"><b>3</b><div>They <b>pair automatically</b> and show up here, ready for one&#8209;click Terminal, VS Code, Cursor and port forwards.</div></div>
     </div>
     <p class="small faint" style="margin-top:22px">Self-hosting Headscale? <a href="#/settings/tailscale">Use a custom control server</a></p>
   </div></div>`;

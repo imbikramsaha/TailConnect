@@ -84,7 +84,7 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 34px; padding: 0 14px;
   border-radius: 9px; border: 1px solid var(--border); background: var(--panel); cursor: pointer;
-  font-weight: 550; white-space: nowrap; transition: background .12s, border-color .12s, opacity .12s;
+  font-weight: 550; white-space: nowrap; text-decoration: none; transition: background .12s, border-color .12s, opacity .12s;
 }
 .btn:hover { background: var(--panel-2); }
 .btn:disabled { opacity: .55; cursor: default; }
@@ -197,7 +197,8 @@ h2.sec .spacer { flex: 1; }
 .hero p { color: var(--muted); font-size: 15px; margin: 0 0 22px; }
 .steps { text-align: left; margin: 26px auto 0; display: grid; gap: 12px; max-width: 440px; }
 .step { display: flex; gap: 12px; align-items: flex-start; }
-.step b { width: 24px; height: 24px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; font-size: 12.5px; flex: none; }
+.step > div { padding-top: 2px; line-height: 1.45; }
+.step > b { width: 24px; height: 24px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; font-size: 12.5px; flex: none; }
 .btn.lg { height: 44px; padding: 0 22px; font-size: 15px; border-radius: 11px; }
 .welcome { max-width: 640px; margin: 40px auto; text-align: center; }
 .welcome h1 { font-size: 22px; }

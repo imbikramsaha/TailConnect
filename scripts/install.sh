@@ -93,7 +93,13 @@ Darwin)
   verify "$TMP/TailConnect-macos.dmg"
   MNT="$TMP/mnt"
   mkdir -p "$MNT"
-  hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$MNT" "$TMP/TailConnect-macos.dmg" >/dev/null
+  # macOS 27 deprecates `hdiutil attach` in favour of `diskutil image`, which
+  # older systems don't have.
+  if diskutil image attach --help >/dev/null 2>&1; then
+    diskutil image attach --mountOptions nobrowse --readOnly --mountPoint "$MNT" "$TMP/TailConnect-macos.dmg" >/dev/null
+  else
+    hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$MNT" "$TMP/TailConnect-macos.dmg" >/dev/null
+  fi
   DEST=/Applications
   [ -w "$DEST" ] || { DEST="$HOME/Applications"; mkdir -p "$DEST"; }
   if pgrep -xq tailconnect 2>/dev/null; then
@@ -102,7 +108,7 @@ Darwin)
   fi
   rm -rf "$DEST/TailConnect.app"
   ditto "$MNT/TailConnect.app" "$DEST/TailConnect.app"
-  hdiutil detach "$MNT" >/dev/null 2>&1 || true
+  diskutil eject "$MNT" >/dev/null 2>&1 || hdiutil detach -force "$MNT" >/dev/null 2>&1 || true
   BIN="$DEST/TailConnect.app/Contents/MacOS/tailconnect"
   for d in /usr/local/bin /opt/homebrew/bin "$HOME/.local/bin"; do
     if [ -d "$d" ] && [ -w "$d" ]; then ln -sf "$BIN" "$d/tailconnect" && LINK="$d/tailconnect" && break; fi
