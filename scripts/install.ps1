@@ -82,6 +82,33 @@ try {
   if ($p.ExitCode -ne 0) { Fail "the installer exited with code $($p.ExitCode)" }
   Say "TailConnect is installed and starting - look for its icon in the system tray."
   Say "Open it any time from the Start menu. The 'tailconnect' command works in new terminals."
+
+  # 4) Screen sharing with RustDesk: asked, unless TAILCONNECT_SCREEN=1/0
+  #    decides. Not asked in automated installs (no console to ask in).
+  $screen = $env:TAILCONNECT_SCREEN
+  if (-not $screen -and -not $env:CI -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
+    Write-Host ""
+    Write-Host "Also set up screen sharing with RustDesk?" -ForegroundColor Cyan -NoNewline
+    Write-Host " It lets your paired devices see and control this"
+    Write-Host "screen through TailConnect (free, open source; Windows asks for permission once). [Y/n] " -NoNewline
+    $ans = Read-Host
+    if ($ans -eq "" -or $ans -match '^(y|yes)$') { $screen = "1" } else { $screen = "0" }
+  }
+  if ($screen -match '^(1|y|yes)$') {
+    $cli = Join-Path $env:LOCALAPPDATA "Programs\TailConnect\tailconnect.exe"
+    $ready = $false
+    for ($i = 0; $i -lt 40; $i++) {
+      & $cli screen status *> $null
+      if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+      Start-Sleep 1
+    }
+    if ($ready) {
+      & $cli screen setup
+      if ($LASTEXITCODE -ne 0) { Write-Host "Screen sharing wasn't set up; you can do it later in Settings - Screen sharing." -ForegroundColor Yellow }
+    } else {
+      Write-Host "TailConnect didn't start in time; set up screen sharing later in Settings - Screen sharing." -ForegroundColor Yellow
+    }
+  }
 } finally {
   Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
 }

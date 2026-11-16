@@ -202,12 +202,13 @@ Tailscale gives your devices a private network. TailConnect builds on it: device
 <summary><b>How do I set up screen sharing?</b></summary>
 <br>
 
-Click **Screen** on a device. TailConnect connects through your private network and opens the best viewer available:
+TailConnect uses [RustDesk](https://rustdesk.com) (free, open source; works between Mac, Windows — including Home — and Linux) and connects it through your private network: no RustDesk servers, nothing open to the internet.
 
-1. **RustDesk** (recommended — any system to any system): install [RustDesk](https://rustdesk.com) on both computers and, on the one you want to see, turn on **Settings → Security → Enable direct IP access** and set a permanent password. TailConnect connects RustDesk directly through the tunnel; no RustDesk servers are involved.
-2. **Built-in tools**: macOS **Screen Sharing** (System Settings → General → Sharing), or **Remote Desktop** on Windows Pro/Enterprise and Linux. To view a Windows PC from a Mac, install Microsoft's free **Windows App**.
+1. On each computer you want to see, set it up once: the install command offers it (**Also set up screen sharing with RustDesk? [Y/n]**), or use **Settings → Screen sharing → Install & set up**, or run `tailconnect screen setup`. It asks for your administrator password once, installs RustDesk from its official release (checked against GitHub's checksum and RustDesk's signature) and configures it.
+2. On a Mac you want to see, allow **RustDesk** under **System Settings → Privacy & Security → Screen Recording** and **Accessibility** — Apple requires you to do this yourself; TailConnect opens the right page.
+3. Click **Screen** on the device. Your paired devices sign in automatically.
 
-If something is missing, TailConnect tells you exactly what to turn on or install.
+Each device page lets you choose **Automatic**, **RustDesk**, or the system's own **Screen Sharing / Remote Desktop**. By default RustDesk accepts connections *only through TailConnect*; turn that off in Settings if you also use RustDesk's own IDs.
 </details>
 
 <details>

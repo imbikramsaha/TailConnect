@@ -35,7 +35,10 @@ jobs:
           cache: false
       - name: Build the CLI
         shell: bash
-        run: CGO_ENABLED=0 go build -o tc$([ "$RUNNER_OS" = Windows ] && echo .exe) ./cmd/tailconnect
+        run: |
+          # macOS needs cgo (menu bar, notifications); the others don't.
+          if [ "$RUNNER_OS" = macOS ]; then go build -o tc ./cmd/tailconnect
+          else CGO_ENABLED=0 go build -o tc$([ "$RUNNER_OS" = Windows ] && echo .exe) ./cmd/tailconnect; fi
 
       - name: Elevated setup (macOS / Linux)
         if: runner.os != 'Windows'
@@ -63,8 +66,8 @@ jobs:
         shell: powershell
         run: |
           New-Item -ItemType Directory spec | Out-Null
-          Set-Content -Encoding ascii -NoNewline spec\spec.json '{"password":"TcCiTest1234567890ab","lock":true,"uid":0}'
-          $spec = (Resolve-Path spec\spec.json).Path
+          $spec = Join-Path (Resolve-Path spec).Path "spec.json"
+          [IO.File]::WriteAllText($spec, '{"password":"TcCiTest1234567890ab","lock":true,"uid":0}')
           .\tc.exe rustdesk-admin $spec
           if ($LASTEXITCODE -ne 0) { throw "rustdesk-admin failed" }
           $res = Get-Content -Raw "$spec.result"; $res

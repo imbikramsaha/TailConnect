@@ -83,6 +83,35 @@ verify() {
   fi
 }
 
+# Screen sharing (RustDesk): asked after installing, unless
+# TAILCONNECT_SCREEN=1 (yes) or 0 (no) decides. Without a terminal to ask
+# in (automated installs), it's skipped.
+want_screen() {
+  case "${TAILCONNECT_SCREEN:-}" in
+  1 | y | yes) return 0 ;;
+  0 | n | no) return 1 ;;
+  esac
+  (: </dev/tty) 2>/dev/null || return 1
+  printf '\033[1mAlso set up screen sharing with RustDesk?\033[0m It lets your paired devices see and\ncontrol this screen through TailConnect (free, open source; asks for your\nadministrator password once). [Y/n] ' >/dev/tty
+  read -r ans </dev/tty || return 1
+  case "$ans" in "" | y | Y | yes | Yes | YES) return 0 ;; esac
+  return 1
+}
+
+# setup_screen <tailconnect>: wait for the app, then let it set up RustDesk.
+setup_screen() {
+  i=0
+  until "$1" screen status >/dev/null 2>&1; do
+    i=$((i + 1))
+    if [ "$i" -ge 40 ]; then
+      warn "TailConnect didn't start in time; set up screen sharing later in Settings - Screen sharing."
+      return 0
+    fi
+    sleep 1
+  done
+  "$1" screen setup || warn "Screen sharing wasn't set up; you can do it later in Settings - Screen sharing."
+}
+
 say "Downloading TailConnect for $OS/$ARCH..."
 fetch "$BASE/SHA256SUMS" "$TMP/SHA256SUMS"
 fetch "$BASE/SHA256SUMS.sig" "$TMP/SHA256SUMS.sig"
@@ -117,6 +146,7 @@ Darwin)
   [ -n "${LINK:-}" ] && say "Command line: tailconnect (linked in $(dirname "$LINK"))"
   open "$DEST/TailConnect.app"
   say "TailConnect is starting - look for its icon in the menu bar."
+  if want_screen; then setup_screen "$BIN"; fi
   ;;
 Linux)
   case "$ARCH" in
@@ -151,6 +181,12 @@ Linux)
     say "Installed to ~/.local/bin (make sure it's on your PATH)"
   fi
   say "TailConnect installed. Start it from your applications menu, or run: tailconnect"
+  # Screen sharing needs a desktop session (not on headless servers).
+  if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && want_screen; then
+    TC=$(command -v tailconnect || echo "$HOME/.local/bin/tailconnect")
+    (nohup "$TC" --background >/dev/null 2>&1 &)
+    setup_screen "$TC"
+  fi
   ;;
 *)
   die "unsupported system $OS - on Windows run: irm https://github.com/$REPO/releases/latest/download/install.ps1 | iex"
