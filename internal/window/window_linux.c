@@ -50,6 +50,8 @@ void tcLinuxInit(const char *url) {
   win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
   gtk_window_set_title(GTK_WINDOW(win), "TailConnect");
   gtk_window_set_default_size(GTK_WINDOW(win), 1180, 800);
+  /* Minimum size; keep in sync with MinWidth/MinHeight in window.go. */
+  gtk_widget_set_size_request(win, 720, 540);
   gtk_window_set_icon_name(GTK_WINDOW(win), "tailconnect");
   gtk_window_set_position(GTK_WINDOW(win), GTK_WIN_POS_CENTER);
 

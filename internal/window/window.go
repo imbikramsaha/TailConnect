@@ -12,6 +12,14 @@ import (
 // ErrUnsupported means no native window on this platform; use a browser.
 var ErrUnsupported = errors.New("native window not supported on this platform")
 
+// MinWidth and MinHeight bound how small the window can be made; below
+// this the UI's compact layout would have to clip content. The macOS
+// (window_darwin.m) and Linux (window_linux.c) values are set in C.
+const (
+	MinWidth  = 720
+	MinHeight = 540
+)
+
 // Supported reports whether Run works here.
 func Supported() bool { return supported }
 

@@ -55,6 +55,7 @@ func Run(in io.Reader) error {
 		return ErrUnsupported
 	}
 	defer w.Destroy()
+	w.SetSize(MinWidth, MinHeight, webview2.HintMin)
 	_ = w.Bind("tcOpenExternal", func(raw string) {
 		if u, ok := safeExternal(raw); ok {
 			_ = launch.OpenURL(u)

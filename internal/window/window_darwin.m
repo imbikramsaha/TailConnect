@@ -56,7 +56,7 @@ void tcWindowSetup(void *win) {
   [NSApp setMainMenu:main];
   [NSApp setWindowsMenu:winMenu];
 
-  w.minSize = NSMakeSize(720, 520);
+  w.minSize = NSMakeSize(720, 540); // keep in sync with MinWidth/MinHeight in window.go
   [w setFrameAutosaveName:@"TailConnectMain"];
   [w center];
   tcWindowActivate();

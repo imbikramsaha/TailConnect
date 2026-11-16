@@ -266,7 +266,7 @@ function sidebar() {
   const other = S.devices.filter(d => d.section === "tailnet");
   return `<aside class="sidebar">
     <div class="side-section"><div class="side-title">My devices</div>
-      ${mine.length ? mine.map(item).join("") : `<div class="side-empty">No devices yet. Install TailConnect on another computer and sign in with the same Tailscale account — it will appear here.</div>`}
+      ${mine.length ? mine.map(item).join("") : `<div class="side-empty">No other devices yet. They appear here when you sign in to TailConnect on them.</div>`}
     </div>
     ${disc.length ? `<div class="side-section"><div class="side-title">Available to pair</div>${disc.map(item).join("")}</div>` : ""}
     ${other.length ? `<div class="side-section"><div class="side-title">Other tailnet devices</div>${other.map(item).join("")}</div>` : ""}
@@ -284,12 +284,28 @@ function viewDevice() {
   const d = selectedDevice();
   if (!d) {
     const disc = S.devices.filter(x => x.section === "discovered");
+    const rel = "https://github.com/imbikramsaha/TailConnect/releases/latest";
+    const cmds = [
+      ["macOS & Linux", "Terminal", `curl -fsSL ${rel}/download/install.sh | sh`],
+      ["Windows", "PowerShell", `irm ${rel}/download/install.ps1 | iex`],
+    ];
     return `<div class="welcome">
+      <img class="welcome-icon" src="/icon.png" alt="">
       <h1>Connect your first device</h1>
-      <p class="muted">Install TailConnect on another computer and sign in with <b>${h(S.tailnet.loginName || "the same account")}</b>. Devices on your account pair automatically${S.settings.autoTrustOwnDevices ? "" : " (auto-pairing is off in Settings)"}.</p>
-      ${disc.length ? `<p>${disc.length} TailConnect device${disc.length > 1 ? "s are" : " is"} ready to pair in the sidebar.</p>` : ""}
-      <p class="muted">Or add any Linux/macOS machine you can SSH into:</p>
-      <button class="btn primary" data-act="add-device">${icon("plus")}Add an SSH host</button>
+      <p class="muted">Install TailConnect on another computer and sign in with <b class="nowrap">${h(S.tailnet.loginName || "the same account")}</b>.
+        ${S.settings.autoTrustOwnDevices ? "Your devices find each other and pair automatically." : "Auto-pairing is off in Settings, so you'll approve each device."}</p>
+      ${disc.length ? `<div class="alert ok-soft">${disc.length} TailConnect device${disc.length > 1 ? "s are" : " is"} ready to pair — see the sidebar.</div>` : ""}
+      <div class="install">
+        ${cmds.map(([os, shell, cmd]) => `<div class="install-row">
+          <div class="install-os"><b>${os}</b><span>${shell}</span></div>
+          <code class="install-cmd">${h(cmd)}</code>
+          <button class="btn sm icon ghost" data-act="copy" data-text="${h(cmd)}" title="Copy command" aria-label="Copy ${os} install command">${icon("copy")}</button>
+        </div>`).join("")}
+      </div>
+      <p class="small muted">Prefer a regular installer? <a href="#" data-act="ext" data-url="${rel}">Download TailConnect</a></p>
+      <div class="or"><span>or</span></div>
+      <button class="btn" data-act="add-device">${icon("plus")}Add an SSH host</button>
+      <p class="small faint" style="margin-top:8px">Any Linux or macOS machine you can SSH into — no TailConnect needed there.</p>
     </div>`;
   }
   const st = statusOf(d);
@@ -333,11 +349,11 @@ function viewDevice() {
   return `
     <div class="dev-head">
       <span class="os-badge">${h(osShort(d.os))}</span>
-      <div style="flex:1;min-width:0"><h1>${h(d.name)}</h1><div class="pills">${pills.join("")}</div></div>
-      ${connBtn}
+      <div class="dev-title"><h1>${h(d.name)}</h1><div class="pills">${pills.join("")}</div></div>
+      <div class="dev-actions">${connBtn}
       <button class="btn icon" data-act="diagnose" data-id="${h(d.id)}" title="Test connection" aria-label="Test connection" ${!d.online ? "disabled" : ""}>${icon("pulse")}</button>
       <button class="btn icon" data-act="rename" data-id="${h(d.id)}" title="Rename" aria-label="Rename">${icon("edit")}</button>
-      <button class="btn icon danger" data-act="remove" data-id="${h(d.id)}" title="Remove device" aria-label="Remove device">${icon("trash")}</button>
+      <button class="btn icon danger" data-act="remove" data-id="${h(d.id)}" title="Remove device" aria-label="Remove device">${icon("trash")}</button></div>
     </div>
     ${alerts}
     <h2 class="sec">Apps<span class="spacer"></span><a class="btn sm ghost" href="#/settings/apps">Choose apps</a></h2>
@@ -426,11 +442,12 @@ function viewProcs(d) {
   if (!ex.open) return head;
   if (ex.err.procs) return head + `<div class="card empty">Couldn't list processes: ${h(ex.err.procs)}</div>`;
   if (!ex.procs) return head + `<div class="card empty"><span class="spinner sm"></span> Loading…</div>`;
-  const rows = ex.procs.slice(0, 15).map(p => `<tr>
-    <td class="mono">${p.pid}</td><td title="${h(p.cmd || p.name)}">${h(p.name || "?")}</td><td class="muted">${h(p.user || "")}</td>
-    <td class="num">${p.cpu.toFixed(1)}%</td><td class="num">${bytes(p.rss)}</td><td class="num">${p.gpuMiB ? bytes(p.gpuMiB * 1048576) : ""}</td>
+  const top = ex.procs.slice(0, 15), gpu = top.some(p => p.gpuMiB);
+  const rows = top.map(p => `<tr>
+    <td class="mono">${p.pid}</td><td class="grow" title="${h(p.cmd || p.name)}">${h(p.name || "?")}</td><td class="muted trunc">${h(p.user || "")}</td>
+    <td class="num">${p.cpu.toFixed(1)}%</td><td class="num">${bytes(p.rss)}</td>${gpu ? `<td class="num">${p.gpuMiB ? bytes(p.gpuMiB * 1048576) : ""}</td>` : ""}
     <td>${full ? `<button class="btn sm ghost danger" data-act="kill" data-id="${h(d.id)}" data-pid="${p.pid}" data-name="${h(p.name)}">Stop</button>` : ""}</td></tr>`).join("");
-  return head + `<div class="card table-wrap"><table class="tbl"><thead><tr><th>PID</th><th>Process</th><th>User</th><th class="num">CPU</th><th class="num">Memory</th><th class="num">GPU</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  return head + `<div class="card table-wrap"><table class="tbl"><thead><tr><th>PID</th><th>Process</th><th>User</th><th class="num">CPU</th><th class="num">Memory</th>${gpu ? `<th class="num">GPU</th>` : ""}<th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 function viewDocker(d) {
@@ -579,7 +596,9 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) poll
 function spark(vals, cls) {
   const pts = vals.filter(v => v != null);
   if (pts.length < 2) return `<svg class="spark ${cls || ""}" viewBox="0 0 100 40" preserveAspectRatio="none"></svg>`;
-  const n = 90, step = 100 / (n - 1), off = n - vals.length;
+  // A short history fills the width; once 90 samples are kept it scrolls.
+  const n = Math.min(90, Math.max(vals.length, 2)), step = 100 / (n - 1), off = Math.max(0, n - vals.length);
+  vals = vals.slice(-n);
   let line = "";
   vals.forEach((v, i) => {
     if (v == null) return;
@@ -625,7 +644,7 @@ function viewMonitor(d) {
   }
   cards.push(`<div class="card"><div class="k"><span>System</span><span>up ${uptime(s.uptime)}</span></div>
     <dl class="kv" style="margin-top:8px">
-      <dt>OS</dt><dd>${h(s.platform || osLabel(s.os))}</dd>
+      <dt>OS</dt><dd>${h(s.platform ? s.platform.replace(/^darwin\b/, "macOS") : osLabel(s.os))}</dd>
       ${s.kernel ? `<dt>Kernel</dt><dd>${h(s.kernel)}</dd>` : ""}
       ${s.cpuModel ? `<dt>CPU</dt><dd>${h(s.cpuModel)}</dd>` : ""}
       <dt>Network</dt><dd>${mon.rate ? `↓ ${bytes(mon.rate.rx)}/s · ↑ ${bytes(mon.rate.tx)}/s` : "measuring…"}</dd>
@@ -856,7 +875,17 @@ root.addEventListener("submit", async e => {
     btn.textContent = label;
   }
 });
-document.addEventListener("keydown", e => { if (e.key === "Escape" && root.innerHTML) closeDialog(); });
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && root.innerHTML) closeDialog();
+  // Cmd+, (macOS) / Ctrl+, opens Settings, as in other desktop apps.
+  if ((e.metaKey || e.ctrlKey) && e.key === "," && !root.innerHTML) { e.preventDefault(); location.hash = "#/settings"; }
+});
+// No browser context menu (Reload, Back, Inspect) except where text can be
+// edited or copied, so the window behaves like an app rather than a page.
+document.addEventListener("contextmenu", e => {
+  if (e.target.closest("input, textarea, .mono, code, dd, .act-row, .alert, .selectable") || String(getSelection())) return;
+  e.preventDefault();
+});
 
 function addDeviceDialog(prefHost, prefName) {
   openDialog("Add an SSH host", "Any Linux or macOS machine you can SSH into — on your LAN, the internet, or your tailnet. Your password is used once to install TailConnect's key and is never stored.", `
