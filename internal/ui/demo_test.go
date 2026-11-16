@@ -41,7 +41,7 @@ func TestDemo(t *testing.T) {
 	defer ctl.HTTPTestServer.Close()
 
 	var urls []string
-	for _, name := range []string{"MacBook Air", "GPU Workstation"} {
+	for _, name := range []string{"MacBook Air", "Mac mini"} {
 		dir := t.TempDir()
 		st, _ := store.Open(filepath.Join(dir, "state.json"))
 		_ = st.Update(func(s *store.State) error {
@@ -50,7 +50,7 @@ func TestDemo(t *testing.T) {
 			return nil
 		})
 		c, err := core.New(core.Options{
-			Version: "0.2.0", Store: st, Headless: true,
+			Version: "0.3.1", Store: st, Headless: true,
 			Tailnet: tailnet.Config{Dir: filepath.Join(dir, "ts"), Hostname: name, ControlURL: ctl.HTTPTestServer.URL, Ephemeral: true, InMemory: true},
 			SSHDir:  filepath.Join(dir, "ssh"), AuthorizedKeys: filepath.Join(dir, "ak"), InboxDir: filepath.Join(dir, "inbox"),
 			DiscoveryInterval: 500 * time.Millisecond, ProbeTailConnect: 2 * time.Second, ProbeOther: 2 * time.Second,
