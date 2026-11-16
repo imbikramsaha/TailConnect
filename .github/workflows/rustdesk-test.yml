@@ -102,7 +102,7 @@ jobs:
             ls -la "$PREFS" ~/Library/Logs/RustDesk/option
             # The planted link loses only its name; the system file is untouched.
             test "$(stat -f %u /private/tmp/tc-system-file)" = 0 || { echo "system file handed to the user"; exit 1; }
-            test "$(cat /private/tmp/tc-system-file)" = system || { echo "system file changed"; exit 1; }
+            test "$(sudo cat /private/tmp/tc-system-file)" = system || { echo "system file changed"; exit 1; }
             test ! -e "$PREFS/RustDesk9.toml" || { echo "planted link left"; exit 1; }
             test -z "$(find "$PREFS" ~/Library/Logs/RustDesk/option -user root)" || { echo "root-owned files left"; exit 1; }
             # RustDesk runs as root during setup: only an administrator may change it.
