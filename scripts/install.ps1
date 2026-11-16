@@ -6,7 +6,7 @@
 # SHA256SUMS and - when an OpenSSL 3 is available (e.g. from Git for Windows)
 # - checks SHA256SUMS against TailConnect's release signing key, then installs
 # for the current user (no administrator rights needed) and starts TailConnect.
-# Pin a version with: $env:TAILCONNECT_VERSION = "0.3.2"
+# Pin a version with: $env:TAILCONNECT_VERSION = "0.3.3"
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"   # much faster downloads in PowerShell 5.1
