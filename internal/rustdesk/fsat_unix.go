@@ -59,22 +59,23 @@ func openSpecDir(dir string) (*specDir, error) {
 
 func (d *specDir) close() { unix.Close(d.fd) }
 
-// read returns the regular file name (at most max bytes) and removes it.
-func (d *specDir) read(name string, max int64) ([]byte, error) {
+// read returns the regular file name (at most max bytes) and its owner's
+// user ID, and removes it.
+func (d *specDir) read(name string, max int64) (b []byte, owner int, err error) {
 	// O_NONBLOCK: a planted FIFO mustn't hang the open (Fstat rejects it).
 	fd, err := unix.Openat(d.fd, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return nil, err
+		return nil, -1, err
 	}
 	f := os.NewFile(uintptr(fd), name)
 	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil || !fi.Mode().IsRegular() || fi.Size() > max {
-		return nil, errors.New("not a small regular file")
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Size > max {
+		return nil, -1, errors.New("not a small regular file")
 	}
-	b, err := io.ReadAll(io.LimitReader(f, max))
+	b, err = io.ReadAll(io.LimitReader(f, max))
 	_ = unix.Unlinkat(d.fd, name, 0)
-	return b, err
+	return b, int(st.Uid), err
 }
 
 // create writes a new file (never an existing one, never through a link).
@@ -91,35 +92,39 @@ func (d *specDir) create(name string, b []byte) error {
 	return err
 }
 
-// giveBack hands the folder open as dfd, and the regular files in it whose
-// names match, from root back to uid:gid. Each file is opened without
-// following links, and skipped if it has another name: a hard link the
-// user planted could be a system file.
-func giveBack(dfd, uid, gid int, match func(name string) bool) (changed bool) {
+// clearRootFiles gives the folder open as dfd back to uid:gid if root owns
+// it, and removes the regular files in it owned by root whose names match:
+// files an earlier administrator run left in the user's folder, which the
+// user's RustDesk can't read (setup writes the settings again afterwards).
+// Removing a name in the user's own folder never changes any other file,
+// even one it's a hard link to, and links are never followed. With dryRun
+// it only reports whether there's anything to do.
+func clearRootFiles(dfd, uid, gid int, match func(name string) bool, dryRun bool) (found bool) {
 	var st unix.Stat_t
-	if unix.Fstat(dfd, &st) == nil && st.Uid == 0 && unix.Fchown(dfd, uid, gid) == nil {
-		changed = true
+	if unix.Fstat(dfd, &st) == nil && st.Uid == 0 {
+		found = true
+		if !dryRun {
+			_ = unix.Fchown(dfd, uid, gid) // a folder: can't be a hard link
+		}
 	}
 	names, err := dirNames(dfd)
 	if err != nil {
-		return changed
+		return found
 	}
 	for _, n := range names {
-		if !match(n) {
+		if !match(n) || unix.Fstatat(dfd, n, &st, unix.AT_SYMLINK_NOFOLLOW) != nil || st.Uid != 0 || st.Mode&unix.S_IFMT != unix.S_IFREG {
 			continue
 		}
-		if unix.Fstatat(dfd, n, &st, unix.AT_SYMLINK_NOFOLLOW) != nil || st.Uid != 0 || st.Mode&unix.S_IFMT != unix.S_IFREG {
-			continue
+		found = true
+		if !dryRun {
+			_ = unix.Unlinkat(dfd, n, 0)
 		}
-		fd, err := unix.Openat(dfd, n, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
-		if err != nil {
-			continue
-		}
-		if unix.Fstat(fd, &st) == nil && st.Uid == 0 && st.Mode&unix.S_IFMT == unix.S_IFREG && st.Nlink == 1 &&
-			unix.Fchown(fd, uid, gid) == nil {
-			changed = true
-		}
-		unix.Close(fd)
 	}
-	return changed
+	return found
 }
+
+// useSystemTemp makes the administrator step's own temporary folders (the
+// RustDesk download, RustDesk's private HOME) go to /tmp, where only their
+// owner can rename or replace them — not to the user's temporary folder,
+// which the elevation may pass on in TMPDIR.
+func useSystemTemp() { os.Unsetenv("TMPDIR") }

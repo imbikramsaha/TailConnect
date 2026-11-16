@@ -68,6 +68,11 @@ func TestAdminMainRefusesBadSpecs(t *testing.T) {
 		t.Error("negative uid accepted")
 	}
 	if runtime.GOOS != "windows" {
+		if err := AdminMain(write("other-uid.json", Spec{UID: os.Getuid() + 1})); err == nil {
+			t.Error("uid other than the spec file's owner accepted")
+		}
+	}
+	if runtime.GOOS != "windows" {
 		target := write("real.json", Spec{})
 		link := filepath.Join(dir, "link.json")
 		os.Symlink(target, link)

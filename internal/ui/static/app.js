@@ -796,15 +796,17 @@ function viewSettings(tab) {
         ${field("RustDesk on this computer", status + (sc.version ? ` <span class="faint">(${h(sc.version)})</span>` : ""),
           `<button class="btn ${sc.configured && !warn ? "" : "primary"}" data-act="screen-setup" ${sc.running ? "disabled" : ""}>${setupLabel}</button>`)}
         ${field("Only through TailConnect", "RustDesk here accepts connections only from your paired devices, through TailConnect. Turn off to also use RustDesk's own IDs, e.g. to help someone outside your devices. Changing it asks for your administrator password.", toggle("rustdeskLock", S.settings.rustdeskLock !== false, sc.running ? "disabled" : ""))}
+        ${sc.configured && !S.headless ? field("Start TailConnect at login", "Your devices reach this computer only while TailConnect runs — keep this on to reach it after a restart.", toggle("startAtLogin", S.settings.startAtLogin)) : ""}
       </div>
       ${sc.error ? `<div class="alert bad">${h(sc.error)}</div>` : warn && !sc.running ? `<div class="alert">${warn}</div>` : ""}
+      ${sc.wayland ? `<div class="alert info">This computer's desktop uses Wayland, where RustDesk's screen sharing is still experimental: someone here may need to approve a connection, and the login screen can't be shown. For reliable unattended access, choose an <b>Xorg</b> (X11) session when you sign in — e.g. “Ubuntu on Xorg”.</div>` : ""}
       ${mac ? `<h2 class="sec">Allow screen sharing on this Mac</h2>
       <div class="card">
         ${field("Screen Recording", "Lets RustDesk show this Mac's screen to your devices. Apple requires you to turn this on yourself.", `<button class="btn" data-act="screen-perm" data-pane="screen">Open settings</button>`)}
         ${field("Accessibility", "Lets your devices use this Mac's mouse and keyboard.", `<button class="btn" data-act="screen-perm" data-pane="accessibility">Open settings</button>`)}
       </div>
       <p class="small faint">Turn on <b>RustDesk</b> in both lists. Only needed on Macs you want to see — not on the one you view from.</p>` : ""}
-      <p class="small faint">Setup installs RustDesk from its official GitHub release (checked against GitHub's checksum and RustDesk's signature), turns on direct access, and sets a random password that's shared only with your paired devices.</p>`;
+      <p class="small faint">Setup installs RustDesk from its official GitHub release (checked against GitHub's checksum and RustDesk's signature), turns on direct access, and sets a random password that's shared only with your paired devices. The first setup also starts TailConnect at login, so your devices can reach this computer after a restart.</p>`;
   } else if (tab === "access") {
     body = `<p class="muted">Devices that can reach <b>${h(S.self.name)}</b>, and what they may do.</p>
       <div class="card list">${S.trusted.length ? S.trusted.map(t => `<div class="row"><div class="grow"><div class="title">${h(t.name)}</div>

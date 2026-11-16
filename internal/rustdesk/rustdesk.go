@@ -278,7 +278,7 @@ func download(ctx context.Context, a asset, dir string) (string, error) {
 // installed, before configuring (macOS: start it in the user's session).
 func Apply(ctx context.Context, spec Spec) Result {
 	var res Result
-	if Bin() == "" {
+	if Bin() == "" || verifyInstalled(ctx) != nil {
 		a, err := latest(ctx)
 		if err != nil {
 			res.Error = err.Error()
@@ -309,10 +309,11 @@ func Apply(ctx context.Context, spec Spec) Result {
 		res.Version = installedVersion(bin)
 	}
 	if runtime.GOOS == "darwin" && spec.UID > 0 {
-		if repairUserConfig(spec.UID) {
-			// A running RustDesk read its settings before they were
-			// repaired (and would overwrite them): start it afresh.
+		if repairUserConfig(spec.UID, true) {
+			// A running RustDesk read its settings before the repair and
+			// would write over it: stop it first, then start it afresh.
 			stopInSession(spec.UID)
+			repairUserConfig(spec.UID, false)
 		}
 		startInSession(spec.UID)
 	}

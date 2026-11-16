@@ -209,6 +209,8 @@ TailConnect uses [RustDesk](https://rustdesk.com) (free, open source; works betw
 3. Click **Screen** on the device. Your paired devices sign in automatically.
 
 Each device page lets you choose **Automatic**, **RustDesk**, or the system's own **Screen Sharing / Remote Desktop**. By default RustDesk accepts connections *only through TailConnect*; turn that off in Settings if you also use RustDesk's own IDs.
+
+Your devices reach a computer only while TailConnect runs on it, so the first setup also turns on **Start at login**. On a Mac, RustDesk accepts connections only while its app runs; TailConnect starts it in the background when one of your devices connects. **Settings → Screen sharing** shows whether RustDesk is ready, and offers **Repair** if something is wrong (for example settings left unreadable by TailConnect 0.3.9).
 </details>
 
 <details>

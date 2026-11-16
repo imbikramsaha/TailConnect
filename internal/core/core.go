@@ -102,7 +102,8 @@ type Core struct {
 		running bool
 		err     string
 	}
-	screenHealth screenHealth // cached; see rustDeskHealth
+	screenHealth  screenHealth // cached; see rustDeskHealth
+	screenStartMu sync.Mutex   // one on-demand RustDesk start at a time
 
 	sshMu   sync.Mutex
 	sshSrv  *sshd.Server
@@ -274,6 +275,9 @@ func (c *Core) Login(ctx context.Context) (string, error) {
 	if u != "" && !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "http://") {
 		return "", fmt.Errorf("the control server sent an unexpected sign-in link")
 	}
+	if u != "" {
+		c.logs.Session.Printf("signing in to Tailscale")
+	}
 	if u != "" && !c.opts.Headless {
 		if err := c.opts.OpenURL(u); err != nil {
 			c.logs.Printf("open login url: %v", err)
@@ -294,6 +298,9 @@ func (c *Core) Logout(ctx context.Context) error {
 		c.Disconnect(id)
 	}
 	err := c.node.Logout(ctx)
+	if err == nil {
+		c.logs.Session.Printf("signed out of Tailscale")
+	}
 	c.events.Notify()
 	return err
 }

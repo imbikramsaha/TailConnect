@@ -14,6 +14,10 @@ func install(context.Context, string) error {
 func startInSession(int) {}
 
 // repairUserConfig is only needed on macOS.
-func repairUserConfig(int) bool { return false }
+func repairUserConfig(int, bool) bool { return false }
+
+// verifyInstalled: RustDesk is installed where only administrators can
+// change it.
+func verifyInstalled(context.Context) error { return nil }
 
 func stopInSession(int) {}

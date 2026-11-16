@@ -56,7 +56,7 @@ func AdminMain(specPath string) error {
 	}
 	defer dir.close()
 	name := filepath.Base(specPath)
-	b, err := dir.read(name, 4096) // removed after reading: it holds the password
+	b, owner, err := dir.read(name, 4096) // removed after reading: it holds the password
 	if err != nil {
 		return errors.New("bad spec file")
 	}
@@ -67,9 +67,12 @@ func AdminMain(specPath string) error {
 	if spec.Password != "" && !passwordRe.MatchString(spec.Password) {
 		return errors.New("bad spec file")
 	}
-	if spec.UID < 0 {
+	// The user whose RustDesk settings get repaired (macOS) is the one who
+	// wrote the spec — not whatever user ID the file claims.
+	if spec.UID < 0 || spec.UID > 0 && spec.UID != owner {
 		return errors.New("bad spec file")
 	}
+	useSystemTemp()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	res := Apply(ctx, spec)

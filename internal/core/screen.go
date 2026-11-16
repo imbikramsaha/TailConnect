@@ -35,7 +35,13 @@ func (c *Core) startsOnDemand() bool { return runtime.GOOS == "darwin" && !c.opt
 // ensureRustDesk starts RustDesk here if it isn't accepting connections and
 // can be started, and waits up to 10 seconds for it.
 func (c *Core) ensureRustDesk() {
-	if !c.startsOnDemand() || rustdesk.Listening() || launch.RustDeskRunning() {
+	if !c.startsOnDemand() || rustdesk.Listening() {
+		return
+	}
+	// One start at a time; later callers then find it listening.
+	c.screenStartMu.Lock()
+	defer c.screenStartMu.Unlock()
+	if rustdesk.Listening() || launch.RustDeskRunning() {
 		return
 	}
 	c.logs.Session.Printf("starting RustDesk for a screen-sharing connection")
@@ -60,7 +66,7 @@ func (c *Core) rustDeskHealth() screenHealth {
 	c.mu.Lock()
 	h := c.screenHealth
 	c.mu.Unlock()
-	if time.Since(h.at) < 5*time.Second {
+	if time.Since(h.at) < 15*time.Second {
 		return h
 	}
 	h = screenHealth{at: time.Now(), listening: rustdesk.Listening(), running: launch.RustDeskRunning(), needsFix: rustdesk.NeedsRepair()}
@@ -92,6 +98,7 @@ func (c *Core) screenView() ScreenView {
 		Running:           running,
 		Error:             errText,
 		StartsOnDemand:    c.startsOnDemand(),
+		Wayland:           runtime.GOOS == "linux" && (os.Getenv("XDG_SESSION_TYPE") == "wayland" || os.Getenv("XDG_SESSION_TYPE") == "" && os.Getenv("WAYLAND_DISPLAY") != ""),
 	}
 	if installed && !c.opts.Headless {
 		h := c.rustDeskHealth()
@@ -171,6 +178,15 @@ func (c *Core) setupScreen(ctx context.Context) error {
 		return nil
 	})
 	c.logs.Session.Printf("RustDesk set up (installed=%v version=%s passwordSet=%v)", res.Installed, res.Version, res.PasswordSet)
+	if !st.RustDesk.Configured && !st.Settings.StartAtLogin {
+		// Devices reach this computer only while TailConnect runs: the
+		// first setup also starts it at login (Settings → General).
+		if err := c.UpdateSettings(func(s *store.Settings) { s.StartAtLogin = true }); err != nil {
+			c.logs.Printf("start at login: %v", err)
+		} else {
+			c.logs.Session.Printf("start at login turned on for screen sharing")
+		}
+	}
 	if runtime.GOOS == "darwin" {
 		// RustDesk asks for Screen Recording and Accessibility itself.
 		_ = launch.OpenApp("RustDesk")

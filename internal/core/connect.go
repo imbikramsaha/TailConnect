@@ -7,6 +7,7 @@ import (
 	"net"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -51,6 +52,9 @@ func (c *Core) Connect(id string) error {
 	if !ok {
 		if _, isPeer := nodeFromDeviceID(id); isPeer {
 			return c.PairDevice(id)
+		}
+		if strings.HasPrefix(id, "n-") {
+			return errors.New("this device doesn't run TailConnect: install TailConnect on it, or add it as an SSH host")
 		}
 		return errors.New("unknown device")
 	}

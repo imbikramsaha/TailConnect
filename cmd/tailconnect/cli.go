@@ -159,8 +159,36 @@ func connectApp(autostart bool) (*control, error) {
 	return nil, errors.New("TailConnect did not start in time")
 }
 
+// cliUsage is each command's usage line, and the number of arguments it
+// takes (max -1: any number). Arguments are checked before anything runs,
+// so a mistyped "logout now" or "cleanup --dry-run" does nothing.
+var cliUsage = map[string]struct {
+	line     string
+	min, max int
+}{
+	"version":    {"tailconnect version", 0, 0},
+	"cleanup":    {"tailconnect cleanup", 0, 0},
+	"proxy":      {"tailconnect proxy <device> <port>", 2, 2},
+	"open":       {"tailconnect open [route]", 0, 1},
+	"quit":       {"tailconnect quit", 0, 0},
+	"screen":     {"tailconnect screen [status|setup]", 0, 1},
+	"login":      {"tailconnect login", 0, 0},
+	"logout":     {"tailconnect logout", 0, 0},
+	"status":     {"tailconnect status", 0, 0},
+	"devices":    {"tailconnect devices", 0, 0},
+	"ls":         {"tailconnect devices", 0, 0},
+	"connect":    {"tailconnect connect <device>", 1, 1},
+	"disconnect": {"tailconnect disconnect <device>", 1, 1},
+	"ssh":        {"tailconnect ssh <device> [ssh args]", 1, -1},
+	"pair":       {"tailconnect pair [list] | approve <id> full|ports|stats | deny <id>", 0, 3},
+}
+
 func runCLI(args []string) int {
 	cmd, rest := args[0], args[1:]
+	if u, ok := cliUsage[cmd]; ok && (len(rest) < u.min || u.max >= 0 && len(rest) > u.max) {
+		fmt.Fprintln(os.Stderr, "usage:", u.line)
+		return 2
+	}
 	switch cmd {
 	case "help", "-h", "--help":
 		usage()
@@ -201,6 +229,11 @@ func runCLI(args []string) int {
 			return 1
 		}
 		return 0
+	}
+	if _, ok := cliUsage[cmd]; !ok {
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
+		usage()
+		return 2
 	}
 	c, err := connectApp(cmd == "open")
 	if err != nil {
@@ -476,14 +509,24 @@ func cleanup() error {
 // sharing (the app asks for administrator rights); "screen status" shows it.
 func screenCmd(c *control, args []string) int {
 	type screenState struct {
-		Screen core.ScreenView `json:"screen"`
+		Screen   core.ScreenView `json:"screen"`
+		Settings struct {
+			StartAtLogin bool `json:"startAtLogin"`
+		} `json:"settings"`
+		Headless bool `json:"headless"`
 	}
+	startAtLogin, headless := true, false
 	get := func() (core.ScreenView, error) {
 		var v screenState
 		err := c.call("GET", "/api/state", nil, &v)
+		startAtLogin, headless = v.Settings.StartAtLogin, v.Headless
 		return v.Screen, err
 	}
 	show := func(s core.ScreenView) {
+		if headless {
+			fmt.Println("Screen sharing: not available — TailConnect runs headless here, and screen sharing needs the desktop app.")
+			return
+		}
 		signIn := "enter RustDesk's password when connecting."
 		if s.PasswordKnown {
 			signIn = "paired devices connect without typing a password."
@@ -538,6 +581,9 @@ func screenCmd(c *control, args []string) int {
 			}
 			if runtime.GOOS == "darwin" {
 				fmt.Println("On this Mac, allow RustDesk under System Settings → Privacy & Security → Screen Recording and Accessibility.")
+			}
+			if !startAtLogin {
+				fmt.Println("Tip: your devices reach this computer only while TailConnect runs — turn on Settings → General → Start at login to reach it after a restart.")
 			}
 			return 0
 		}

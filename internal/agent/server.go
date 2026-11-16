@@ -74,7 +74,9 @@ type Host interface {
 	PeerKey(nodeID string) string
 	// PendingKey is the key of the caller's pairing request id ("" if none).
 	PendingKey(nodeID, id string) string
-	// ScreenInfo describes how to view this device's screen (with secrets).
+	// ScreenInfo describes how to view this device's screen (with secrets),
+	// starting screen sharing if needed. Only for callers allowed to reach
+	// RustDeskPort.
 	ScreenInfo() ScreenInfo
 }
 
@@ -637,10 +639,12 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, c Caller, _ stri
 // screen tells a caller allowed to reach the screen-sharing port how to
 // sign in to it (e.g. the RustDesk password TailConnect set).
 func (s *Server) screen(w http.ResponseWriter, r *http.Request, c Caller, _ string) {
-	info := s.Host.ScreenInfo()
-	if info.RustDesk != nil && !s.Host.AllowPort(c.NodeID, info.RustDesk.Port) {
-		info.RustDesk = nil
-	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, info)
+	// Checked first: asking also starts RustDesk here if it isn't running,
+	// which only callers allowed to reach its port may do.
+	if !s.Host.AllowPort(c.NodeID, RustDeskPort) {
+		writeJSON(w, http.StatusOK, ScreenInfo{})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.Host.ScreenInfo())
 }

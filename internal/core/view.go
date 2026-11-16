@@ -108,11 +108,12 @@ type ScreenView struct {
 	Version           string `json:"version,omitempty"`
 	Running           bool   `json:"running"` // setup in progress
 	Error             string `json:"error,omitempty"`
-	// Health, checked at most every few seconds.
+	// Health, checked at most every 15 seconds.
 	Listening      bool `json:"listening"`                // RustDesk accepts connections now
 	AppRunning     bool `json:"appRunning"`               // the RustDesk app runs for this user
 	NeedsRepair    bool `json:"needsRepair,omitempty"`    // settings RustDesk can't read; setup repairs them
 	StartsOnDemand bool `json:"startsOnDemand,omitempty"` // TailConnect starts RustDesk when a device connects (macOS)
+	Wayland        bool `json:"wayland,omitempty"`        // Linux desktop on Wayland (RustDesk support is limited)
 }
 
 // View is the full UI state.
