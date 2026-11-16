@@ -9,7 +9,7 @@
 # then installs:
 #   macOS:  TailConnect.app in /Applications (or ~/Applications) + `tailconnect` command
 #   Linux:  the .deb (apt) or .rpm (dnf/yum/zypper) package, or a user-local install
-# Options (environment): TAILCONNECT_VERSION=0.3.4 to pin a version.
+# Options (environment): TAILCONNECT_VERSION=0.3.5 to pin a version.
 set -eu
 
 REPO="imbikramsaha/TailConnect"
