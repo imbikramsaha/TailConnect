@@ -224,7 +224,7 @@ func TestSessionLifecycle(t *testing.T) {
 	// Idle sessions expire.
 	b := newSess()
 	s.tmu.Lock()
-	s.sessions[b] = time.Now().Add(-sessionIdle - time.Minute)
+	s.sessions[b] = session{last: time.Now().Add(-sessionIdle - time.Minute)}
 	s.tmu.Unlock()
 	if ok(b) {
 		t.Error("idle session still works")

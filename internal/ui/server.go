@@ -67,7 +67,8 @@ type Server struct {
 
 	tmu      sync.Mutex
 	tickets  map[string]time.Time // one-time window sign-in tickets
-	sessions map[string]time.Time // UI window sessions -> last use (never the CLI token)
+	sessions map[string]session   // UI window sessions (never the CLI token)
+	useSeq   uint64               // orders session use (clocks can tie)
 }
 
 // Listen binds the control API on loopback, preferring DefaultPort.
@@ -249,16 +250,25 @@ func (s *Server) authed(r *http.Request) bool {
 	}
 	s.tmu.Lock()
 	defer s.tmu.Unlock()
-	last, ok := s.sessions[tok]
+	ss, ok := s.sessions[tok]
 	if !ok {
 		return false
 	}
-	if time.Since(last) > sessionIdle {
+	if time.Since(ss.last) > sessionIdle {
 		delete(s.sessions, tok)
 		return false
 	}
-	s.sessions[tok] = time.Now()
+	s.useSeq++
+	s.sessions[tok] = session{last: time.Now(), seq: s.useSeq}
 	return true
+}
+
+// session records a window session's last use: the time (for expiry) and a
+// sequence number (for least-recently-used eviction; coarse clocks, as on
+// Windows, give many uses the same time).
+type session struct {
+	last time.Time
+	seq  uint64
 }
 
 const (
@@ -277,23 +287,24 @@ func (s *Server) newSession() string {
 	s.tmu.Lock()
 	defer s.tmu.Unlock()
 	if s.sessions == nil {
-		s.sessions = map[string]time.Time{}
+		s.sessions = map[string]session{}
 	}
-	for k, t := range s.sessions {
-		if now.Sub(t) > sessionIdle {
+	for k, ss := range s.sessions {
+		if now.Sub(ss.last) > sessionIdle {
 			delete(s.sessions, k)
 		}
 	}
 	for len(s.sessions) >= maxSessions {
 		var oldest string
-		for k, t := range s.sessions {
-			if oldest == "" || t.Before(s.sessions[oldest]) {
+		for k, ss := range s.sessions {
+			if oldest == "" || ss.seq < s.sessions[oldest].seq {
 				oldest = k
 			}
 		}
 		delete(s.sessions, oldest)
 	}
-	s.sessions[sess] = now
+	s.useSeq++
+	s.sessions[sess] = session{last: now, seq: s.useSeq}
 	return sess
 }
 
