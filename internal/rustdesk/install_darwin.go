@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -68,4 +70,48 @@ func startInSession(uid int) {
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
+}
+
+// repairUserConfig gives the user back RustDesk settings files that an
+// earlier administrator run (TailConnect 0.3.9) left owned by root in the
+// user's settings folder — the user's RustDesk can't read them, so it loses
+// its settings (direct access, password) the next time it starts.
+// Only RustDesk's own settings files are touched, and links are never
+// followed (Lstat/Lchown): this runs as root in a folder the user controls.
+func repairUserConfig(uid int) {
+	u, err := user.LookupId(strconv.Itoa(uid))
+	if err != nil || u.HomeDir == "" {
+		return
+	}
+	gid, _ := strconv.Atoi(u.Gid)
+	dir := filepath.Join(u.HomeDir, "Library", "Preferences", "com.carriez.RustDesk")
+	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	if st, ok := mustStat(dir); ok && st.Uid == 0 {
+		_ = os.Lchown(dir, uid, gid)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "RustDesk") || !strings.HasSuffix(name, ".toml") {
+			continue
+		}
+		p := filepath.Join(dir, name)
+		if st, ok := mustStat(p); ok && st.Uid == 0 && st.Mode&syscall.S_IFMT == syscall.S_IFREG {
+			_ = os.Lchown(p, uid, gid)
+		}
+	}
+}
+
+func mustStat(p string) (*syscall.Stat_t, bool) {
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return nil, false
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return st, ok
 }

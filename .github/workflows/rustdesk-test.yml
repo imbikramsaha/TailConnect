@@ -49,6 +49,13 @@ jobs:
         run: |
           mkdir -p spec && chmod 700 spec
           uid=0; [ "$RUNNER_OS" = macOS ] && uid=$(id -u)
+          PREFS="$HOME/Library/Preferences/com.carriez.RustDesk"
+          if [ "$RUNNER_OS" = macOS ]; then
+            # Recreate what TailConnect 0.3.9 left behind: a root-owned
+            # settings file in the user's RustDesk folder (setup must repair it).
+            mkdir -p "$PREFS" && sudo sh -c "printf '[options]\n' > '$PREFS/RustDesk2.toml' && chmod 600 '$PREFS/RustDesk2.toml'"
+            ls -la "$PREFS"
+          fi
           printf '{"password":"TcCiTest1234567890ab","lock":true,"uid":%s}' "$uid" > spec/spec.json
           chmod 600 spec/spec.json
           sudo GITHUB_TOKEN="$GITHUB_TOKEN" ./tc rustdesk-admin "$PWD/spec/spec.json"
@@ -60,6 +67,11 @@ jobs:
           test "$(sudo $RD --option direct-server)" = Y
           test "$(sudo $RD --option whitelist)" = "127.0.0.1,::1"
           test "$(sudo $RD --option approve-mode)" = password
+          if [ "$RUNNER_OS" = macOS ]; then
+            ls -la "$PREFS"
+            # Nothing in the user's RustDesk settings may be left owned by root.
+            test -z "$(find "$PREFS" -user root)" || { echo "root-owned files left in $PREFS"; exit 1; }
+          fi
           # Running again (e.g. "Set up again") keeps working on an installed RustDesk.
           printf '{"password":"TcCiTest1234567890ab","lock":false,"uid":%s}' "$uid" > spec/spec2.json && chmod 600 spec/spec2.json
           sudo GITHUB_TOKEN="$GITHUB_TOKEN" ./tc rustdesk-admin "$PWD/spec/spec2.json" && cat spec/spec2.json.result; echo

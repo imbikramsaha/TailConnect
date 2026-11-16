@@ -31,3 +31,6 @@ func install(ctx context.Context, pkg string) error {
 }
 
 func startInSession(int) {}
+
+// repairUserConfig is only needed on macOS.
+func repairUserConfig(int) {}

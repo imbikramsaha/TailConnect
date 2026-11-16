@@ -309,7 +309,22 @@ func Apply(ctx context.Context, spec Spec) Result {
 		res.Version = installedVersion(bin)
 	}
 	if runtime.GOOS == "darwin" && spec.UID > 0 {
+		repairUserConfig(spec.UID)
 		startInSession(spec.UID)
+	}
+	// RustDesk's command line sends settings to the running RustDesk (which
+	// saves them as the user) and then also writes its own copy under $HOME.
+	// Run as an administrator with the user's HOME (macOS keeps it), that
+	// copy would be a root-owned file in the user's settings folder, which
+	// the user's RustDesk then can't read. Give it a private HOME instead.
+	home, err := os.MkdirTemp("", "tailconnect-rustdesk-home-")
+	if err != nil {
+		res.Error = err.Error()
+		return res
+	}
+	defer os.RemoveAll(home)
+	run := func(ctx context.Context, bin string, args ...string) (string, error) {
+		return runIn(ctx, home, bin, args...)
 	}
 	var errs []string
 	set := func(k, v string) {
@@ -339,11 +354,21 @@ func Apply(ctx context.Context, spec Spec) Result {
 	return res
 }
 
-// run runs RustDesk's command line (fixed binary, fixed option names).
-func run(ctx context.Context, bin string, args ...string) (string, error) {
+// runIn runs RustDesk's command line (fixed binary, fixed option names)
+// with HOME set to home (unless empty).
+func runIn(ctx context.Context, home, bin string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, args...)
+	if home != "" && runtime.GOOS != "windows" {
+		env := []string{"HOME=" + home}
+		for _, kv := range os.Environ() {
+			if !strings.HasPrefix(kv, "HOME=") {
+				env = append(env, kv)
+			}
+		}
+		cmd.Env = env
+	}
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	err := cmd.Run()
@@ -351,7 +376,7 @@ func run(ctx context.Context, bin string, args ...string) (string, error) {
 }
 
 func installedVersion(bin string) string {
-	out, err := run(context.Background(), bin, "--version")
+	out, err := runIn(context.Background(), "", bin, "--version")
 	if err != nil || len(out) > 40 || strings.ContainsAny(out, " \n") {
 		return ""
 	}
