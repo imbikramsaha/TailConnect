@@ -329,14 +329,25 @@ func (c *Core) RemoteDesktop(ctx context.Context, id string) (string, error) {
 		return "", err
 	}
 	// RustDesk first when both ends have it (it works between every pair of
-	// systems, Windows Home included), then the system's own remote desktop.
+	// systems, Windows Home included), then the system's own remote desktop
+	// — unless the device's screen-sharing choice says otherwise.
 	type cand struct {
 		port        int
 		kind, label string
 	}
-	cands := []cand{{21118, launch.ScreenRustDesk, "RustDesk"}, {3389, launch.ScreenRDP, "Remote Desktop"}, {5900, launch.ScreenVNC, "VNC"}}
+	rustdesk := cand{agent.RustDeskPort, launch.ScreenRustDesk, "RustDesk"}
+	system := []cand{{3389, launch.ScreenRDP, "Remote Desktop"}, {5900, launch.ScreenVNC, "VNC"}}
 	if dev.OS == "darwin" {
-		cands = []cand{cands[0], {5900, launch.ScreenVNC, "Screen Sharing"}}
+		system = []cand{{5900, launch.ScreenVNC, "Screen Sharing"}}
+	}
+	var cands []cand
+	switch dev.Screen {
+	case ScreenRustDesk:
+		cands = []cand{rustdesk}
+	case ScreenSystem:
+		cands = system
+	default:
+		cands = append([]cand{rustdesk}, system...)
 	}
 	var missing []string
 	for _, cd := range cands {
@@ -347,6 +358,9 @@ func (c *Core) RemoteDesktop(ctx context.Context, id string) (string, error) {
 			missing = append(missing, cd.label+": "+hint)
 			continue
 		}
+		if cd.kind == launch.ScreenRustDesk {
+			return cd.label, c.openRustDesk(ctx, dev)
+		}
 		r, err := c.Forward(ctx, id, cd.port, cd.label, false)
 		if err != nil {
 			return "", err
@@ -356,15 +370,69 @@ func (c *Core) RemoteDesktop(ctx context.Context, id string) (string, error) {
 	if len(missing) > 0 {
 		return "", fmt.Errorf("%s is ready for screen sharing, but this computer needs a viewer. %s", dev.Name, strings.Join(missing, ". Or "))
 	}
-	rustdesk := "install RustDesk on both computers and turn on its Settings → Security → Enable direct IP access (works on every system, including Windows Home)"
-	hint := "turn on Remote Desktop (GNOME: Settings → System → Remote Desktop), or " + rustdesk
+	rd := "set up screen sharing with RustDesk in TailConnect's Settings → Screen sharing on both computers (works on every system, including Windows Home)"
+	hint := "turn on Remote Desktop (GNOME: Settings → System → Remote Desktop), or " + rd
 	switch dev.OS {
 	case "darwin":
-		hint = "turn on System Settings → General → Sharing → Screen Sharing, or " + rustdesk
+		hint = "turn on System Settings → General → Sharing → Screen Sharing, or " + rd
 	case "windows":
-		hint = "turn on Settings → System → Remote Desktop (Windows Pro/Enterprise), or " + rustdesk
+		hint = "turn on Settings → System → Remote Desktop (Windows Pro/Enterprise), or " + rd
+	}
+	if dev.Screen == ScreenRustDesk {
+		hint = rd
 	}
 	return "", fmt.Errorf("screen sharing isn't enabled on %s: %s", dev.Name, hint)
+}
+
+// Screen-sharing choices for a device (store.Device.Screen).
+const (
+	ScreenAuto     = ""
+	ScreenRustDesk = "rustdesk"
+	ScreenSystem   = "system"
+)
+
+// SetScreenChoice sets how a device's screen is opened.
+func (c *Core) SetScreenChoice(id, choice string) error {
+	if choice != ScreenAuto && choice != ScreenRustDesk && choice != ScreenSystem {
+		return errors.New("choice must be automatic, rustdesk or system")
+	}
+	err := c.store.Update(func(st *store.State) error {
+		i := st.FindDevice(id)
+		if i < 0 {
+			return errors.New("unknown device")
+		}
+		st.Devices[i].Screen = choice
+		return nil
+	})
+	c.events.Notify()
+	return err
+}
+
+// openRustDesk opens this computer's RustDesk on a device's RustDesk
+// through a one-shot tunnel, signed in with the password TailConnect set
+// there (fetched from the device after verifying it's really TailConnect).
+func (c *Core) openRustDesk(ctx context.Context, dev store.Device) error {
+	password := ""
+	if dev.Kind == store.KindPeer {
+		if ip, err := c.peerIP(dev); err == nil && c.verifyPeer(ctx, dev, ip) == nil {
+			if si, err := c.agentCli.Screen(ctx, ip); err == nil && si.RustDesk != nil {
+				password = si.RustDesk.Password
+			}
+		}
+	}
+	devID := dev.ID
+	port, err := forward.StartOnce(30*time.Second, func(ctx context.Context) (net.Conn, error) {
+		d, ok := c.device(devID)
+		if !ok {
+			return nil, errors.New("device removed")
+		}
+		return c.dialPort(ctx, d, agent.RustDeskPort)
+	}, c.logs.Printf)
+	if err != nil {
+		return err
+	}
+	c.logs.Session.Printf("opened RustDesk on %q", dev.Name)
+	return launch.OpenRustDesk(port, password)
 }
 
 // ---- diagnostics ----

@@ -93,6 +93,8 @@ Commands:
   pair approve <id> <full|ports|stats>
                           approve a pairing request with that access
   pair deny <id>          decline a pairing request
+  screen setup            install and set up RustDesk for screen sharing
+  screen status           show screen-sharing setup
   proxy <device> <port>   stdio tunnel to a device port (used by ssh ProxyCommand)
   cleanup                 remove TailConnect's SSH keys/config entries (for uninstalling)
   quit                    quit the running app

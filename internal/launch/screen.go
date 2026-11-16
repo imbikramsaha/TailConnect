@@ -6,7 +6,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
+	"strings"
+	"time"
 )
 
 // Screen-sharing protocols TailConnect can open through a tunnel.
@@ -117,6 +120,81 @@ func screenViewer(kind string, port int) []string {
 		}
 	}
 	return nil
+}
+
+// OpenPrivacyPane opens macOS's Privacy & Security settings at Screen
+// Recording ("screen") or Accessibility ("accessibility").
+func OpenPrivacyPane(pane string) error {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	anchor := map[string]string{"screen": "Privacy_ScreenCapture", "accessibility": "Privacy_Accessibility"}[pane]
+	if anchor == "" {
+		return fmt.Errorf("unknown settings pane %q", pane)
+	}
+	return start("open", "x-apple.systempreferences:com.apple.preference.security?"+anchor)
+}
+
+// OpenApp opens a macOS app by name (no-op elsewhere).
+func OpenApp(name string) error {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	return start("open", "-a", name)
+}
+
+// OpenRustDesk connects the RustDesk viewer here to 127.0.0.1:port (a
+// one-shot tunnel to another computer's RustDesk), signing in with password
+// if known. RustDesk is started first: a "--connect" request is then handed
+// to the running app and its process exits at once, so the password is on
+// a command line only for an instant (a cold start would keep it there for
+// as long as RustDesk runs).
+func OpenRustDesk(port int, password string) error {
+	bin := rustDeskBin()
+	if bin == nil {
+		_, hint := ScreenViewer(ScreenRustDesk)
+		return fmt.Errorf("can't open RustDesk: %s", hint)
+	}
+	if !rustDeskRunning() {
+		if runtime.GOOS == "darwin" {
+			_ = start("open", "-a", "RustDesk")
+		} else {
+			_ = start(bin[0], bin[1:]...)
+		}
+		for i := 0; i < 30 && !rustDeskRunning(); i++ {
+			time.Sleep(200 * time.Millisecond)
+		}
+		time.Sleep(2 * time.Second) // let it finish starting before handing over
+	}
+	argv := append(slices.Clone(bin), "--connect", "127.0.0.1:"+strconv.Itoa(port))
+	if password != "" {
+		argv = append(argv, "--password", password)
+	}
+	return start(argv[0], argv[1:]...)
+}
+
+// rustDeskRunning reports whether the RustDesk app (not only its service)
+// is running for this user.
+func rustDeskRunning() bool {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("pgrep", "-x", "-U", strconv.Itoa(os.Getuid()), "RustDesk").Run() == nil
+	case "windows":
+		out, err := exec.Command("tasklist", "/FI", "IMAGENAME eq rustdesk.exe", "/FI", "USERNAME eq "+os.Getenv("USERNAME"), "/NH").Output()
+		return err == nil && strings.Contains(strings.ToLower(string(out)), "rustdesk.exe")
+	default:
+		// The UI runs without --service/--server arguments.
+		out, err := exec.Command("pgrep", "-a", "-u", strconv.Itoa(os.Getuid()), "-f", "rustdesk").Output()
+		if err != nil {
+			return false
+		}
+		for _, l := range strings.Split(string(out), "\n") {
+			if l != "" && !strings.Contains(l, "--service") && !strings.Contains(l, "--server") && !strings.Contains(l, "--tray") {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 func rustDeskBin() []string {

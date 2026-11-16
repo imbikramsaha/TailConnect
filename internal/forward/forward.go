@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/imbikramsaha/tailconnect/internal/netx"
 )
@@ -109,4 +110,37 @@ func ipv6Loopback() bool {
 	}
 	l.Close()
 	return true
+}
+
+// StartOnce listens on a random 127.0.0.1 port for exactly one connection,
+// relays it through dial, and stops listening — so a port opened for one
+// viewer (e.g. a RustDesk session) can't be reused by anyone else on this
+// computer afterwards. It also stops if nothing connects within wait.
+func StartOnce(wait time.Duration, dial DialFunc, logf func(string, ...any)) (port int, err error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	port = ln.Addr().(*net.TCPAddr).Port
+	timer := time.AfterFunc(wait, func() { ln.Close() })
+	go func() {
+		c, err := ln.Accept()
+		timer.Stop()
+		ln.Close()
+		if err != nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		up, err := dial(ctx)
+		cancel()
+		if err != nil {
+			if logf != nil {
+				logf("forward once :%d: %v", port, err)
+			}
+			c.Close()
+			return
+		}
+		netx.Pipe(c, up)
+	}()
+	return port, nil
 }

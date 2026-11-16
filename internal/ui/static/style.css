@@ -292,6 +292,8 @@ input:focus, select:focus, textarea:focus { outline: 2px solid color-mix(in srgb
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }
 .f > .seg { justify-self: start; }
 .seg button { border: 0; background: transparent; padding: 6px 12px; cursor: pointer; }
+.seg.sm button { padding: 4px 10px; font-size: 12.5px; }
+.screen-choice { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
 .seg button.sel { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 
 /* ---------- toasts ---------- */

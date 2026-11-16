@@ -134,3 +134,17 @@ type Caller struct {
 	Tagged    bool   `json:"tagged"`
 	Addr      string `json:"addr"`
 }
+
+// ScreenInfo tells a paired device how to view this one's screen.
+type ScreenInfo struct {
+	RustDesk *RustDeskInfo `json:"rustdesk,omitempty"`
+}
+
+// RustDeskInfo: RustDesk set up by TailConnect, reachable through a tunnel.
+type RustDeskInfo struct {
+	Port     int    `json:"port"`
+	Password string `json:"password,omitempty"`
+}
+
+// RustDeskPort is RustDesk's direct-IP-access port.
+const RustDeskPort = 21118

@@ -368,7 +368,11 @@ function viewDevice() {
       <span class="ico">${icon(APP_ICON[b.id] || "code")}</span><span class="t">${h(b.name)}</span><span class="s">${h(sub)}</span></button>`;
   }).join("");
   const extraTiles = portsOK ? `<button class="app-tile" data-act="remote-desktop" data-id="${h(d.id)}" ${!d.online ? "disabled" : ""} title="RustDesk, Screen Sharing or Remote Desktop">
-      <span class="ico">${icon("screen")}</span><span class="t">Screen</span><span class="s">${d.os === "darwin" ? "Screen Sharing" : d.os === "windows" ? "Remote Desktop" : "RDP / VNC"}</span></button>` : "";
+      <span class="ico">${icon("screen")}</span><span class="t">Screen</span><span class="s">${d.screen === "rustdesk" ? "RustDesk" : d.screen === "system" ? (d.os === "darwin" ? "Screen Sharing" : "Remote Desktop") : "RustDesk or built-in"}</span></button>` : "";
+  // Which tool the Screen tile opens: RustDesk, the system's own, or the best available.
+  const screenChoice = portsOK ? `<div class="screen-choice"><span class="small muted">Screen sharing</span>
+      <div class="seg sm">${[["", "Automatic"], ["rustdesk", "RustDesk"], ["system", d.os === "darwin" ? "Screen Sharing" : "Built-in"]].map(([v, l]) =>
+        `<button type="button" data-act="screen-choice" data-id="${h(d.id)}" data-v="${v}" class="${(d.screen || "") === v ? "sel" : ""}">${l}</button>`).join("")}</div></div>` : "";
 
   return `
     <div class="dev-head">
@@ -382,6 +386,7 @@ function viewDevice() {
     ${alerts}
     <h2 class="sec">Apps<span class="spacer"></span><a class="btn sm ghost" href="#/settings/apps">Choose apps</a></h2>
     <div class="apps">${tiles}${extraTiles}</div>
+    ${screenChoice}
     ${portsOK ? `<h2 class="sec">Running on ${h(d.name)}<span class="spacer"></span><button class="btn sm ghost" data-act="ex-refresh" data-what="services">Refresh</button></h2>
     <div id="ex-services">${viewServices(d)}</div>` : ""}
     <h2 class="sec">Custom apps &amp; ports<span class="spacer"></span><button class="btn sm ghost" data-act="edit-app">${icon("plus")}New</button></h2>
@@ -717,7 +722,7 @@ function viewOnboarding() {
 }
 
 // ---------- settings ----------
-const TABS = [["general", "General"], ["apps", "Apps"], ["custom", "Custom apps"], ["access", "Devices & access"], ["activity", "Activity"], ["tailscale", "Tailscale"], ["about", "About"]];
+const TABS = [["general", "General"], ["apps", "Apps"], ["custom", "Custom apps"], ["access", "Devices & access"], ["screen", "Screen sharing"], ["activity", "Activity"], ["tailscale", "Tailscale"], ["about", "About"]];
 
 function toggle(key, checked, extra) {
   return `<label class="switch"><input type="checkbox" data-set="${key}" ${checked ? "checked" : ""} ${extra || ""}><span></span></label>`;
@@ -768,6 +773,26 @@ function viewSettings(tab) {
       : `<div class="empty">No custom apps.</div>`}</div>
       <p><button class="btn primary" data-act="edit-app">${icon("plus")}Add custom app</button></p>
       <p class="small muted">A custom app forwards a port from a device to <code>localhost</code> on this computer. An optional bash launch script starts the service first (Linux/macOS). Scripts and logs live in <code>~/.config/tailconnect</code> on the device.</p>`;
+  } else if (tab === "screen") {
+    const sc = S.screen || {};
+    const status = sc.running ? `<span class="spinner sm"></span> Setting up — confirm the administrator prompt`
+      : sc.configured ? (sc.passwordKnown ? "Set up — your devices connect without a password" : "Set up — enter RustDesk's password when connecting")
+      : sc.rustdeskInstalled ? "Installed, not set up for TailConnect yet" : "Not installed";
+    const mac = S.self.os === "darwin";
+    body = `<p class="muted">Screen sharing uses <a href="#" data-act="ext" data-url="https://rustdesk.com">RustDesk</a> — free, open source, and it works between Mac, Windows (including Home) and Linux. TailConnect connects it through your private network: no RustDesk servers, nothing open to the internet.</p>
+      <div class="card">
+        ${field("RustDesk on this computer", status + (sc.version ? ` <span class="faint">(${h(sc.version)})</span>` : ""),
+          `<button class="btn ${sc.configured ? "" : "primary"}" data-act="screen-setup" ${sc.running ? "disabled" : ""}>${sc.configured ? "Set up again" : sc.rustdeskInstalled ? "Set up" : "Install & set up"}</button>`)}
+        ${field("Only through TailConnect", "RustDesk here accepts connections only from your paired devices, through TailConnect. Turn off to also use RustDesk's own IDs, e.g. to help someone outside your devices. Changing it asks for your administrator password.", toggle("rustdeskLock", S.settings.rustdeskLock !== false, sc.running ? "disabled" : ""))}
+      </div>
+      ${sc.error ? `<div class="alert bad">${h(sc.error)}</div>` : ""}
+      ${mac ? `<h2 class="sec">Allow screen sharing on this Mac</h2>
+      <div class="card">
+        ${field("Screen Recording", "Lets RustDesk show this Mac's screen to your devices. Apple requires you to turn this on yourself.", `<button class="btn" data-act="screen-perm" data-pane="screen">Open settings</button>`)}
+        ${field("Accessibility", "Lets your devices use this Mac's mouse and keyboard.", `<button class="btn" data-act="screen-perm" data-pane="accessibility">Open settings</button>`)}
+      </div>
+      <p class="small faint">Turn on <b>RustDesk</b> in both lists. Only needed on Macs you want to see — not on the one you view from.</p>` : ""}
+      <p class="small faint">Setup installs RustDesk from its official GitHub release (checked against GitHub's checksum and RustDesk's signature), turns on direct access, and sets a random password that's shared only with your paired devices.</p>`;
   } else if (tab === "access") {
     body = `<p class="muted">Devices that can reach <b>${h(S.self.name)}</b>, and what they may do.</p>
       <div class="card list">${S.trusted.length ? S.trusted.map(t => `<div class="row"><div class="grow"><div class="title">${h(t.name)}</div>
@@ -1101,6 +1126,9 @@ const actions = {
     const r = await api.post(`/api/devices/${enc(el.dataset.id)}/wake`);
     toast(`Wake signal sent via ${r.via}. It can take a minute to come online.`);
   }),
+  "screen-setup": () => run("screen-setup", () => api.post("/api/screen/setup")),
+  "screen-perm": el => run("screen-perm", () => api.post("/api/screen/permissions", { pane: el.dataset.pane })),
+  "screen-choice": el => run("sc:" + el.dataset.id, () => api.put(`/api/devices/${enc(el.dataset.id)}/screen`, { choice: el.dataset.v })),
   "remote-desktop": el => run("rd:" + el.dataset.id, async () => {
     try {
       const r = await api.post(`/api/devices/${enc(el.dataset.id)}/remote-desktop`);

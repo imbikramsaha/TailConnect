@@ -1,0 +1,82 @@
+name: RustDesk setup test
+
+# Runs TailConnect's real elevated RustDesk setup ("tailconnect rustdesk-admin")
+# on clean machines: download from RustDesk's GitHub release, checksum and
+# signature checks, install, and configuration. Runs when that code changes,
+# weekly (RustDesk releases change), and on demand.
+on:
+  push:
+    branches: [main]
+    paths:
+      - internal/rustdesk/**
+      - .github/workflows/rustdesk-test.yml
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 2"
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build the CLI
+        shell: bash
+        run: CGO_ENABLED=0 go build -o tc$([ "$RUNNER_OS" = Windows ] && echo .exe) ./cmd/tailconnect
+
+      - name: Elevated setup (macOS / Linux)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p spec && chmod 700 spec
+          uid=0; [ "$RUNNER_OS" = macOS ] && uid=$(id -u)
+          printf '{"password":"TcCiTest1234567890ab","lock":true,"uid":%s}' "$uid" > spec/spec.json
+          chmod 600 spec/spec.json
+          sudo ./tc rustdesk-admin "$PWD/spec/spec.json"
+          cat spec/spec.json.result; echo
+          test ! -e spec/spec.json   # the password file is removed
+          grep -q '"installed":true' spec/spec.json.result
+          ! grep -q '"error"' spec/spec.json.result || { echo "setup reported an error (expected on headless runners for some steps)"; }
+          RD=/usr/bin/rustdesk; [ "$RUNNER_OS" = macOS ] && RD=/Applications/RustDesk.app/Contents/MacOS/RustDesk
+          test "$(sudo $RD --option direct-server)" = Y
+          test "$(sudo $RD --option whitelist)" = "127.0.0.1,::1"
+          test "$(sudo $RD --option approve-mode)" = password
+          # Running again (e.g. "Set up again") keeps working on an installed RustDesk.
+          printf '{"password":"TcCiTest1234567890ab","lock":false,"uid":%s}' "$uid" > spec/spec2.json && chmod 600 spec/spec2.json
+          sudo ./tc rustdesk-admin "$PWD/spec/spec2.json" && cat spec/spec2.json.result; echo
+          test -z "$(sudo $RD --option whitelist)"
+
+      - name: Elevated setup (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory spec | Out-Null
+          Set-Content -Encoding ascii -NoNewline spec\spec.json '{"password":"TcCiTest1234567890ab","lock":true,"uid":0}'
+          $spec = (Resolve-Path spec\spec.json).Path
+          .\tc.exe rustdesk-admin $spec
+          if ($LASTEXITCODE -ne 0) { throw "rustdesk-admin failed" }
+          $res = Get-Content -Raw "$spec.result"; $res
+          if (Test-Path $spec) { throw "password file not removed" }
+          $r = $res | ConvertFrom-Json
+          if (-not $r.installed) { throw "not installed" }
+          if (-not $r.passwordSet) { throw "password not set" }
+          if ($r.error) { throw "setup error: $($r.error)" }
+          $rd = "C:\Program Files\RustDesk\rustdesk.exe"
+          function opt($k) { $p = Start-Process $rd -ArgumentList "--option $k" -PassThru -RedirectStandardOutput o.txt; $null = $p.Handle; $null = $p.WaitForExit(60000); (Get-Content -Raw o.txt).Trim() }
+          if ((opt direct-server) -ne "Y") { throw "direct access not on" }
+          if ((opt whitelist) -ne "127.0.0.1,::1") { throw "not locked" }
+          if ((opt verification-method) -ne "use-permanent-password") { throw "verification method not set" }
+          Start-Sleep 5
+          if (-not (Get-NetTCPConnection -State Listen -LocalPort 21118 -ErrorAction SilentlyContinue)) { throw "RustDesk isn't listening on 21118" }

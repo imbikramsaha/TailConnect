@@ -57,6 +57,9 @@ type Settings struct {
 	OwnDeviceAccess string `json:"ownDeviceAccess"`
 	// Notifications shows system notifications.
 	Notifications bool `json:"notifications"`
+	// RustDeskLock limits RustDesk (when TailConnect set it up) to
+	// connections through TailConnect; off also allows RustDesk's own IDs.
+	RustDeskLock bool `json:"rustdeskLock"`
 	// CheckUpdates looks for new releases daily.
 	CheckUpdates bool `json:"checkUpdates"`
 	// Alerts watches connected devices' resources.
@@ -121,6 +124,9 @@ type Device struct {
 	// it — e.g. another program on that machine posing as TailConnect —
 	// are refused.
 	PeerKey string `json:"peerKey,omitempty"`
+	// Screen is the preferred way to view this device's screen:
+	// "" (automatic), "rustdesk" or "system".
+	Screen string `json:"screen,omitempty"`
 }
 
 // App is a custom app: a remote port forwarded to localhost, optionally
@@ -188,6 +194,22 @@ type State struct {
 	Ignored []string `json:"ignored,omitempty"`
 	// Pending are pairing requests made to this device.
 	Pending []Pending `json:"pending,omitempty"`
+	// RustDesk is TailConnect's setup of RustDesk on this computer.
+	RustDesk RustDeskSetup `json:"rustdesk,omitempty"`
+}
+
+// RustDeskSetup records how TailConnect configured RustDesk here.
+type RustDeskSetup struct {
+	// Password is the random permanent RustDesk password TailConnect set.
+	// It is shared only with paired devices allowed to share this screen.
+	Password string `json:"password,omitempty"`
+	// Configured: TailConnect set RustDesk up (direct access on). Password
+	// stays empty if RustDesk refused it (then people type RustDesk's own).
+	Configured bool `json:"configured,omitempty"`
+	// Locked: RustDesk only accepts connections through TailConnect.
+	Locked       bool      `json:"locked,omitempty"`
+	Version      string    `json:"version,omitempty"`
+	ConfiguredAt time.Time `json:"configuredAt,omitempty"`
 }
 
 // stateVersion is the current schema version.
@@ -208,6 +230,7 @@ func defaults() State {
 			BuiltinSSH:          true,
 			OwnDeviceAccess:     AccessFull,
 			Notifications:       true,
+			RustDeskLock:        true,
 			CheckUpdates:        true,
 			Alerts:              DefaultAlerts(),
 		},

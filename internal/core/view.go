@@ -31,6 +31,7 @@ type DeviceView struct {
 	Name        string    `json:"name"`
 	Alias       string    `json:"alias,omitempty"`
 	OS          string    `json:"os,omitempty"`
+	Screen      string    `json:"screen"` // screen-sharing choice: "", "rustdesk", "system"
 	Host        string    `json:"host,omitempty"`
 	Port        int       `json:"port,omitempty"`
 	User        string    `json:"user,omitempty"`
@@ -98,6 +99,17 @@ type SelfView struct {
 	ConfigPath          string `json:"configPath,omitempty"`
 }
 
+// ScreenView is screen-sharing setup on this computer.
+type ScreenView struct {
+	RustDeskInstalled bool   `json:"rustdeskInstalled"`
+	Configured        bool   `json:"configured"`    // set up by TailConnect
+	PasswordKnown     bool   `json:"passwordKnown"` // paired devices sign in automatically
+	Locked            bool   `json:"locked"`
+	Version           string `json:"version,omitempty"`
+	Running           bool   `json:"running"` // setup in progress
+	Error             string `json:"error,omitempty"`
+}
+
 // View is the full UI state.
 type View struct {
 	Version         string              `json:"version"`
@@ -116,6 +128,7 @@ type View struct {
 	InstallWarning  string              `json:"installWarning,omitempty"`
 	Update          UpdateInfo          `json:"update"`
 	InboxDir        string              `json:"inboxDir,omitempty"`
+	Screen          ScreenView          `json:"screen"`
 }
 
 var (
@@ -142,6 +155,7 @@ func builtinAvailability() map[string]bool {
 func (c *Core) Snapshot(ctx context.Context) View {
 	st := c.store.Get()
 	v := View{
+		Screen:          c.screenView(),
 		Version:         c.opts.Version,
 		Tailnet:         c.node.Info(ctx),
 		Apps:            st.Apps,
@@ -182,7 +196,7 @@ func (c *Core) Snapshot(ctx context.Context) View {
 	saved := map[string]bool{}
 	for _, d := range st.Devices {
 		dv := DeviceView{
-			ID: d.ID, Kind: d.Kind, Section: SectionMine, Name: d.Name, Alias: d.Alias, OS: d.OS,
+			ID: d.ID, Kind: d.Kind, Section: SectionMine, Name: d.Name, Alias: d.Alias, OS: d.OS, Screen: d.Screen,
 			Host: d.Host, Port: d.Port, User: d.User, Via: d.Via, Home: d.Home, State: StateDisconnected,
 			Running: []running{},
 		}

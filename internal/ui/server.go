@@ -112,6 +112,9 @@ func (s *Server) Serve(ln net.Listener) error {
 	api.HandleFunc("POST /api/logout", s.logout)
 	api.HandleFunc("POST /api/devices/ssh", s.addSSH)
 	api.HandleFunc("PATCH /api/devices/{id}", s.renameDevice)
+	api.HandleFunc("PUT /api/devices/{id}/screen", s.setScreenChoice)
+	api.HandleFunc("POST /api/screen/setup", s.screenSetup)
+	api.HandleFunc("POST /api/screen/permissions", s.screenPermissions)
 	api.HandleFunc("DELETE /api/devices/{id}", s.removeDevice)
 	api.HandleFunc("POST /api/devices/{id}/connect", s.connect)
 	api.HandleFunc("POST /api/devices/{id}/disconnect", s.disconnect)
@@ -552,6 +555,42 @@ func (s *Server) renameDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Core.RenameDevice(r.PathValue("id"), body.Name); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	ok(w)
+}
+
+func (s *Server) setScreenChoice(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Choice string `json:"choice"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.Core.SetScreenChoice(r.PathValue("id"), body.Choice); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	ok(w)
+}
+
+func (s *Server) screenSetup(w http.ResponseWriter, r *http.Request) {
+	if err := s.Core.StartScreenSetup(); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	ok(w)
+}
+
+// screenPermissions opens macOS's privacy settings for RustDesk.
+func (s *Server) screenPermissions(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Pane string `json:"pane"`
+	}
+	_ = decode(r, &body)
+	if err := launch.OpenPrivacyPane(body.Pane); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}

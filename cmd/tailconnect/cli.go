@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/imbikramsaha/tailconnect/internal/autostart"
 	"github.com/imbikramsaha/tailconnect/internal/core"
 	"github.com/imbikramsaha/tailconnect/internal/paths"
+	"github.com/imbikramsaha/tailconnect/internal/rustdesk"
 	"github.com/imbikramsaha/tailconnect/internal/sshconf"
 	"github.com/imbikramsaha/tailconnect/internal/sshkeys"
 	"github.com/imbikramsaha/tailconnect/internal/store"
@@ -180,6 +182,15 @@ func runCLI(args []string) int {
 		}
 		fmt.Println("Removed TailConnect's SSH keys and config entries.")
 		return 0
+	case "rustdesk-admin":
+		// Internal: the elevated step of screen-sharing setup.
+		if len(rest) != 1 {
+			return 2
+		}
+		if err := rustdesk.AdminMain(rest[0]); err != nil {
+			return fatal(err)
+		}
+		return 0
 	case "proxy":
 		if len(rest) != 2 {
 			fmt.Fprintln(os.Stderr, "usage: tailconnect proxy <device> <port>")
@@ -204,6 +215,8 @@ func runCLI(args []string) int {
 		return check(c.call("POST", "/api/show", map[string]string{"route": route}, nil))
 	case "quit":
 		return check(c.call("POST", "/api/quit", struct{}{}, nil))
+	case "screen":
+		return screenCmd(c, rest)
 	case "login":
 		var r struct {
 			AuthURL string `json:"authURL"`
@@ -457,4 +470,68 @@ func cleanup() error {
 	}
 	errs = append(errs, autostart.Set(false, ""))
 	return errors.Join(errs...)
+}
+
+// screenCmd: "screen setup" installs and configures RustDesk for screen
+// sharing (the app asks for administrator rights); "screen status" shows it.
+func screenCmd(c *control, args []string) int {
+	type screenState struct {
+		Screen core.ScreenView `json:"screen"`
+	}
+	get := func() (core.ScreenView, error) {
+		var v screenState
+		err := c.call("GET", "/api/state", nil, &v)
+		return v.Screen, err
+	}
+	show := func(s core.ScreenView) {
+		switch {
+		case s.Configured && s.PasswordKnown:
+			fmt.Println("Screen sharing: RustDesk is set up; paired devices connect without typing a password.")
+		case s.Configured:
+			fmt.Println("Screen sharing: RustDesk is set up; enter RustDesk's password when connecting.")
+		case s.RustDeskInstalled:
+			fmt.Println("Screen sharing: RustDesk is installed but not set up for TailConnect (run: tailconnect screen setup).")
+		default:
+			fmt.Println("Screen sharing: RustDesk isn't installed (run: tailconnect screen setup).")
+		}
+		if s.Configured && s.Locked {
+			fmt.Println("RustDesk accepts connections only through TailConnect.")
+		}
+		if s.Error != "" {
+			fmt.Println("Last setup problem:", s.Error)
+		}
+	}
+	if len(args) == 0 || args[0] == "status" {
+		s, err := get()
+		if err != nil {
+			return fatal(err)
+		}
+		show(s)
+		return 0
+	}
+	if args[0] != "setup" {
+		fmt.Fprintln(os.Stderr, "usage: tailconnect screen [status|setup]")
+		return 2
+	}
+	if err := c.call("POST", "/api/screen/setup", struct{}{}, nil); err != nil {
+		return fatal(err)
+	}
+	fmt.Println("Setting up RustDesk for screen sharing — confirm the administrator prompt…")
+	for {
+		time.Sleep(time.Second)
+		s, err := get()
+		if err != nil {
+			return fatal(err)
+		}
+		if !s.Running {
+			show(s)
+			if s.Error != "" {
+				return 1
+			}
+			if runtime.GOOS == "darwin" {
+				fmt.Println("On this Mac, allow RustDesk under System Settings → Privacy & Security → Screen Recording and Accessibility.")
+			}
+			return 0
+		}
+	}
 }

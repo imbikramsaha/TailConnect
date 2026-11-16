@@ -97,6 +97,11 @@ type Core struct {
 	selfUserID int64
 	selfNodeID string
 	selfIPs    []netip.Addr // this device's tailnet addresses
+	// screenSetup tracks a RustDesk setup started from the UI.
+	screenSetup struct {
+		running bool
+		err     string
+	}
 
 	sshMu   sync.Mutex
 	sshSrv  *sshd.Server
@@ -299,6 +304,11 @@ func (c *Core) UpdateSettings(fn func(*store.Settings)) error {
 	if before.StartAtLogin != after.StartAtLogin && !c.opts.Headless {
 		if err := autostart.Set(after.StartAtLogin, c.appExe()); err != nil {
 			errs = append(errs, fmt.Errorf("start at login: %w", err))
+		}
+	}
+	if before.RustDeskLock != after.RustDeskLock && c.store.Get().RustDesk.Configured {
+		if err := c.StartScreenSetup(); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	if before.ManageSSHConfig != after.ManageSSHConfig {

@@ -292,3 +292,12 @@ func (c *Client) GetClipboard(ctx context.Context, ip string) (string, error) {
 func (c *Client) SetClipboard(ctx context.Context, ip, text string) error {
 	return c.do(ctx, http.MethodPut, ip, "/v1/clipboard", Clipboard{Text: text}, nil)
 }
+
+// Screen asks a device how to view its screen.
+func (c *Client) Screen(ctx context.Context, ip string) (*ScreenInfo, error) {
+	var si ScreenInfo
+	if err := c.do(ctx, http.MethodGet, ip, "/v1/screen", nil, &si); err != nil {
+		return nil, err
+	}
+	return &si, nil
+}

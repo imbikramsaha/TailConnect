@@ -74,6 +74,8 @@ type Host interface {
 	PeerKey(nodeID string) string
 	// PendingKey is the key of the caller's pairing request id ("" if none).
 	PendingKey(nodeID, id string) string
+	// ScreenInfo describes how to view this device's screen (with secrets).
+	ScreenInfo() ScreenInfo
 }
 
 // Server serves the agent API.
@@ -155,6 +157,7 @@ func (s *Server) Serve(ln net.Listener) error {
 	mux.HandleFunc("GET /v1/clipboard", s.need(AccessFull, s.getClipboard))
 	mux.HandleFunc("PUT /v1/clipboard", s.need(AccessFull, s.setClipboard))
 	mux.HandleFunc("GET /v1/tunnel", s.need(AccessPorts, s.tunnel))
+	mux.HandleFunc("GET /v1/screen", s.need(AccessPorts, s.screen))
 	s.speedSem = make(chan struct{}, 2)
 	srv := &http.Server{
 		Handler:           mux,
@@ -629,4 +632,15 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, c Caller, _ stri
 		defer untrack()
 		netx.Pipe(&netx.BufConn{Conn: conn, R: brw.Reader}, up)
 	}()
+}
+
+// screen tells a caller allowed to reach the screen-sharing port how to
+// sign in to it (e.g. the RustDesk password TailConnect set).
+func (s *Server) screen(w http.ResponseWriter, r *http.Request, c Caller, _ string) {
+	info := s.Host.ScreenInfo()
+	if info.RustDesk != nil && !s.Host.AllowPort(c.NodeID, info.RustDesk.Port) {
+		info.RustDesk = nil
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, info)
 }
