@@ -10,7 +10,7 @@ require (
 	github.com/shirou/gopsutil/v4 v4.26.10
 	github.com/webview/webview_go v0.0.0-20240831120633-6173450d4dd6
 	golang.org/x/crypto v0.59.0
-	golang.org/x/net v0.62.0
+	golang.org/x/net v0.63.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.48.0
 	golang.org/x/time v0.16.0
